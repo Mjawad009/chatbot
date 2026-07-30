@@ -1,0 +1,56 @@
+{
+  "tenant_meta": {
+    "vertical": "survey",
+    "widget_title": "Insight Bot",
+    "widget_subtitle": "Assistant",
+    "persona": "",
+    "provider": {},
+    "allowedOrigins": [],
+    "booking": {
+      "fields": [
+        {
+          "key": "name",
+          "label": "Full name",
+          "required": true
+        },
+        {
+          "key": "email",
+          "label": "Email address",
+          "required": true
+        },
+        {
+          "key": "preferredTime",
+          "label": "Preferred date/time for a call",
+          "required": false
+        }
+      ]
+    },
+    "integrations": {
+      "email": {
+        "enabled": false,
+        "smtpHost": "smtp.gmail.com",
+        "smtpPort": 465,
+        "user": "",
+        "pass": "",
+        "to": ""
+      },
+      "whatsapp": {
+        "enabled": false,
+        "phoneNumberId": "",
+        "accessToken": "",
+        "to": ""
+      },
+      "webhook": {
+        "enabled": false,
+        "url": "",
+        "headers": {
+          "X-Webhook-Secret": ""
+        }
+      }
+    }
+  },
+  "suggested_questions": [],
+  "survey_meta": {
+    "title": ""
+  }
+}

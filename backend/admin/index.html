@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Insight Bot — Admin</title>
+<link rel="stylesheet" href="/admin-assets/shared.css" />
+<style>
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tabs button.active { border-color: var(--gold); color: var(--gold); }
+
+  .log-table-wrap { overflow-x: auto; }
+  table.log-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.log-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--text-dim); font-weight: 500; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.4px; white-space: nowrap; position: sticky; top: 0; background: var(--panel); }
+  table.log-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+  table.log-table td.wrap { white-space: normal; }
+  table.log-table tr:hover td { background: var(--panel-2); }
+  table.log-table td.ts { color: var(--text-dim); white-space: nowrap; }
+
+  .badge.open { background: var(--gold-soft); color: var(--gold); }
+  .badge.locked { background: var(--teal-soft); color: var(--teal); }
+</style>
+</head>
+<body>
+
+  <div id="originWarningBanner"></div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Tenants</h2><span id="tenantCount" class="status-line"></span></div>
+    <div class="panel-body" id="tenantsBody"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Tenant config editor</h2>
+      <div style="display:flex; gap:8px;">
+        <select id="tenantPicker"><option value="">Select tenant…</option></select>
+        <button id="newTenantBtn">+ New tenant</button>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div class="status-line" style="margin-bottom:8px;">Master prompt: <span class="mono">tenant_meta.persona</span> · Branding: <span class="mono">tenant_meta.widget_title</span> / <span class="mono">widget_subtitle</span> · Channels: <span class="mono">tenant_meta.integrations.{email,whatsapp,webhook}</span></div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Embed snippet</strong>
+          <button id="regenerateKeyBtn">Regenerate key</button>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">
+          This is the entire integration a tenant's site needs — one script tag, pasted anywhere in their HTML.
+          The key isn't a true secret (it's sitting right here in this page's source once embedded) — its purpose
+          is per-tenant rate-limit handling and the ability to revoke/rotate one tenant's key without affecting
+          any other tenant. Regenerating immediately invalidates the old key — any site still using it will get
+          blocked until it's updated with the new snippet.
+        </div>
+        <textarea id="embedSnippet" class="mono" readonly rows="2" style="width:100%; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 10px; font-size:12px; resize:vertical;"></textarea>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:6px;">
+          <span id="embedCopyStatus" class="status-line"></span>
+          <button id="copyEmbedBtn">Copy</button>
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Branding / theme</strong>
+          <button id="clearThemeBtn">Reset to defaults</button>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">Overrides the widget's default colors. Covers borders, message backgrounds, and soft text — a few elements (the launcher button, some shadows) aren't wired to this yet.</div>
+        <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:12px;">
+          <label class="status-line">Logo URL (optional — shown in the widget header, https:// only)</label>
+          <input type="text" id="themeLogoUrl" class="mono" placeholder="https://example.com/logo.png" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11.5px;" />
+        </div>
+        <div id="themeRows" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap:10px;"></div>
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Suggested starter questions</strong>
+          <button id="addQuestionBtn">+ Add question</button>
+        </div>
+        <div id="questionRows" style="display:flex; flex-direction:column; gap:6px;"></div>
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Booking form fields</strong>
+          <button id="addFieldBtn">+ Add field</button>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">Field name is the internal key. Description is what the bot asks for AND what the extraction step uses to understand what to pull from the customer's reply.</div>
+        <div id="fieldRows" style="display:flex; flex-direction:column; gap:6px;"></div>
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Serviced countries</strong>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">Consultancy-vertical tenants only. This is the HARD boundary the bot enforces — if a destination country isn't listed here, the bot refuses to answer visa/process questions about it rather than guessing from general knowledge. Leave empty to disable this check entirely for this tenant.</div>
+        <input type="text" id="countriesInput" placeholder="Comma-separated, e.g. United Kingdom, Canada, United States" style="width:100%; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Offices</strong>
+          <button id="addOfficeBtn">+ Add office</button>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">Consultancy-vertical tenants only. "Serves destinations" is a comma-separated list of countries this office handles visas/applications for — the bot uses it to point users to the right office instead of listing all of them.</div>
+        <div id="officeRows" style="display:flex; flex-direction:column; gap:8px;"></div>
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">Data residency (advanced)</strong>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">
+          Optional dedicated infrastructure for this tenant. Leave any field blank to keep that piece on the
+          shared platform default — this isn't all-or-nothing, e.g. a tenant can have a dedicated database
+          while still sharing the default vector search. Config (FAQs, prompts, branding) always stays on the
+          shared platform regardless — only this tenant's own end-user data (leads, chat transcripts, and/or
+          document vectors) moves. Apply <span class="mono">db/schema-tenant-dedicated.sql</span> to a
+          dedicated database before pointing this at it.
+        </div>
+        <div style="display:flex; flex-direction:column; gap:8px;">
+          <label class="status-line">Dedicated Postgres connection string (leads + conversation history)
+            <input type="text" id="residencyDbUrl" class="mono" placeholder="postgres://user:pass@host:5432/dbname" style="width:100%; margin-top:4px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12px;" />
+          </label>
+          <label class="status-line">Dedicated Qdrant URL (document vectors)
+            <input type="text" id="residencyQdrantUrl" class="mono" placeholder="https://xyz.qdrant.io" style="width:100%; margin-top:4px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12px;" />
+          </label>
+          <label class="status-line">Dedicated Qdrant API key
+            <input type="text" id="residencyQdrantKey" class="mono" placeholder="(leave blank if the dedicated instance doesn't require one)" style="width:100%; margin-top:4px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12px;" />
+          </label>
+          <label class="status-line">Dedicated Qdrant collection name (optional — defaults to the platform's standard collection name on that instance)
+            <input type="text" id="residencyQdrantCollection" class="mono" placeholder="tenant_documents" style="width:100%; margin-top:4px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12px;" />
+          </label>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <span class="status-line">Advanced: raw JSON (everything else — persona, integrations, allowed origins, vertical…)</span>
+        <button id="reloadFromJsonBtn">↻ Reload form above from JSON</button>
+      </div>
+      <textarea id="tenantEditor" spellcheck="false" style="width:100%; height:280px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:12px; font-family:var(--mono); font-size:12.5px; resize:vertical;" placeholder="Select or create a tenant to edit its JSON here…"></textarea>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">
+        <span id="editorStatus" class="status-line"></span>
+        <button id="saveTenantBtn" class="primary">Save &amp; reload</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Logs</h2>
+      <div class="tabs" id="logTabs"></div>
+    </div>
+    <div class="panel-body">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+        <label class="status-line">Show
+          <select id="logLimit">
+            <option value="10">10</option>
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="200">200</option>
+          </select>
+          entries
+        </label>
+        <div style="display:flex; gap:8px;">
+          <button id="exportJsonBtn">Export JSON</button>
+          <button id="exportCsvBtn">Export CSV</button>
+          <button id="refreshLogsBtn">Refresh</button>
+        </div>
+      </div>
+      <div id="logsBody"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+<script src="/admin-assets/shared.js"></script>
+<script>
+AdminShell.mount({
+  active: "tenants",
+  title: "Tenants",
+  subtitle: "Manage tenant configuration, content, and prompts.",
+  actions: '<span id="reloadStatus" class="status-line"></span><button id="reloadBtn" class="primary">Reload tenants</button>',
+});
+
+const LOG_TYPES = ["conversations", "leads", "security", "feedback", "errors"];
+let activeLogType = "conversations";
+
+async function api(path, options = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: "same-origin",
+      signal: AbortSignal.timeout(15_000),
+      ...options,
+    });
+  } catch (err) {
+    // fetch() throwing (not a 4xx/5xx — an actual failed response) means the
+    // request never completed: server unreachable, DNS failure, or a
+    // timeout. This is deliberately worded differently from an HTTP error.
+    if (err.name === "TimeoutError") throw new Error("Request timed out — server may be slow or unreachable.");
+    throw new Error("Network error — couldn't reach the server. Check it's running and this page was opened from its actual URL (not a local file).");
+  }
+  if (res.status === 401) {
+    window.location.href = "/admin/login";
+    throw new Error("Session expired — redirecting to login.");
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { const body = await res.json(); if (body?.error) detail = body.error; } catch { /* not JSON */ }
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+// Logout is handled by the sidebar (AdminShell) now.
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+async function loadTenantPicker() {
+  const sel = document.getElementById("tenantPicker");
+  const current = sel.value;
+  try {
+    const data = await api("/api/admin/tenant-files");
+    sel.innerHTML = '<option value="">Select tenant…</option>' + data.tenantIds.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+    if (current) sel.value = current;
+  } catch (err) {
+    document.getElementById("editorStatus").textContent = `Failed to list tenants: ${err.message}`;
+  }
+}
+
+// --- Structured editors (questions + booking fields) sync with the JSON
+// textarea below them. The textarea stays the single source of truth for
+// everything else (persona, integrations, etc); these two sections are
+// just a friendlier way to edit two specific arrays inside it. ---
+
+const THEME_KEYS = [
+  { key: "accent", label: "Accent" },
+  { key: "accentDark", label: "Accent (dark)" },
+  { key: "accentSoft", label: "Accent (soft)" },
+  { key: "text", label: "Text" },
+  { key: "textSoft", label: "Text (soft)" },
+  { key: "border", label: "Border" },
+  { key: "bg", label: "Background" },
+];
+
+function getStructuredFromJsonText(jsonText) {
+  try {
+    const parsed = JSON.parse(jsonText);
+    return {
+      questions: Array.isArray(parsed.suggested_questions) ? parsed.suggested_questions : [],
+      fields: Array.isArray(parsed.tenant_meta?.booking?.fields) ? parsed.tenant_meta.booking.fields : [],
+      theme: parsed.tenant_meta?.branding?.theme && typeof parsed.tenant_meta.branding.theme === "object" ? parsed.tenant_meta.branding.theme : {},
+      offices: Array.isArray(parsed.offices) ? parsed.offices : [],
+      countries: Array.isArray(parsed.servicedCountries) ? parsed.servicedCountries : [],
+      dataResidency: parsed.tenant_meta?.dataResidency && typeof parsed.tenant_meta.dataResidency === "object" ? parsed.tenant_meta.dataResidency : {},
+    };
+  } catch {
+    return { questions: [], fields: [], theme: {}, offices: [], countries: [], dataResidency: {} };
+  }
+}
+
+function applyStructuredToJsonText(jsonText, questions, fields, theme, offices, countries, dataResidency) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    parsed = {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) parsed = {};
+  parsed.suggested_questions = questions;
+  parsed.tenant_meta = parsed.tenant_meta && typeof parsed.tenant_meta === "object" ? parsed.tenant_meta : {};
+  parsed.tenant_meta.booking = parsed.tenant_meta.booking && typeof parsed.tenant_meta.booking === "object" ? parsed.tenant_meta.booking : {};
+  parsed.tenant_meta.booking.fields = fields;
+  parsed.tenant_meta.branding = parsed.tenant_meta.branding && typeof parsed.tenant_meta.branding === "object" ? parsed.tenant_meta.branding : {};
+  if (theme && Object.keys(theme).length) parsed.tenant_meta.branding.theme = theme;
+  else delete parsed.tenant_meta.branding.theme;
+  if (dataResidency && Object.keys(dataResidency).length) parsed.tenant_meta.dataResidency = dataResidency;
+  else delete parsed.tenant_meta.dataResidency;
+  // Top-level, like faqs/programs — flows straight into the CONTENT JSON
+  // the LLM cites from (see buildConsultancySystemPrompt in server.js).
+  if (offices && offices.length) parsed.offices = offices;
+  else delete parsed.offices;
+  if (countries && countries.length) parsed.servicedCountries = countries;
+  else delete parsed.servicedCountries;
+  return JSON.stringify(parsed, null, 2);
+}
+
+function renderThemeRows(theme) {
+  const logoInput = document.getElementById("themeLogoUrl");
+  logoInput.value = typeof theme.imageUrl === "string" ? theme.imageUrl : "";
+  if (!logoInput.dataset.bound) {
+    logoInput.dataset.bound = "1";
+    logoInput.addEventListener("input", () => syncStructuredToJson());
+  }
+  const el = document.getElementById("themeRows");
+  el.innerHTML = "";
+  const hexPattern = /^#[0-9a-fA-F]{6}$/;
+  THEME_KEYS.forEach(({ key, label }) => {
+    const value = hexPattern.test(theme[key] || "") ? theme[key] : "#809a39";
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "display:flex; flex-direction:column; gap:4px;";
+    wrap.innerHTML = `
+      <label class="status-line">${label}</label>
+      <div style="display:flex; gap:6px; align-items:center;">
+        <input type="color" class="theme-color" data-key="${key}" value="${value}" style="width:34px; height:28px; padding:2px; background:var(--panel-2); border:1px solid var(--line); border-radius:6px; cursor:pointer;" />
+        <input type="text" class="theme-hex mono" data-key="${key}" value="${theme[key] || ""}" placeholder="unset" style="flex:1; width:0; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11.5px;" />
+      </div>`;
+    const colorInput = wrap.querySelector(".theme-color");
+    const hexInput = wrap.querySelector(".theme-hex");
+    colorInput.addEventListener("input", () => { hexInput.value = colorInput.value; syncStructuredToJson(); });
+    hexInput.addEventListener("input", () => {
+      if (hexPattern.test(hexInput.value.trim())) colorInput.value = hexInput.value.trim();
+      syncStructuredToJson();
+    });
+    el.appendChild(wrap);
+  });
+}
+
+function readThemeFromDom() {
+  const theme = {};
+  document.querySelectorAll(".theme-hex").forEach((input) => {
+    const v = input.value.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) theme[input.dataset.key] = v;
+  });
+  const logoUrl = (document.getElementById("themeLogoUrl").value || "").trim();
+  if (/^https:\/\//i.test(logoUrl)) theme.imageUrl = logoUrl;
+  return theme;
+}
+
+document.getElementById("clearThemeBtn").addEventListener("click", () => {
+  renderThemeRows({});
+  document.getElementById("themeLogoUrl").value = "";
+  document.querySelectorAll(".theme-hex").forEach((i) => (i.value = ""));
+  syncStructuredToJson();
+});
+
+function renderQuestionRows(questions) {
+  const el = document.getElementById("questionRows");
+  el.innerHTML = "";
+  questions.forEach((q, i) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex; gap:6px;";
+    row.innerHTML = `<input type="text" class="q-input" value="${q.replace(/"/g, "&quot;")}" style="flex:1; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" /><button class="q-remove">✕</button>`;
+    row.querySelector(".q-input").addEventListener("input", syncStructuredToJson);
+    row.querySelector(".q-remove").addEventListener("click", () => { questions.splice(i, 1); renderQuestionRows(questions); syncStructuredToJson(); });
+    el.appendChild(row);
+  });
+  el._questions = questions;
+}
+
+function renderFieldRows(fields) {
+  const el = document.getElementById("fieldRows");
+  el.innerHTML = "";
+  fields.forEach((f, i) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex; gap:6px; align-items:center;";
+    row.innerHTML = `
+      <input type="text" class="f-key" placeholder="field_key" value="${(f.key || "").replace(/"/g, "&quot;")}" style="width:130px; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12.5px; font-family:var(--mono);" />
+      <input type="text" class="f-label" placeholder="Description the bot/LLM sees" value="${(f.label || "").replace(/"/g, "&quot;")}" style="flex:1; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <label class="status-line" style="display:flex; align-items:center; gap:4px; white-space:nowrap;"><input type="checkbox" class="f-required" ${f.required ? "checked" : ""} /> required</label>
+      <button class="f-remove">✕</button>`;
+    row.querySelector(".f-key").addEventListener("input", syncStructuredToJson);
+    row.querySelector(".f-label").addEventListener("input", syncStructuredToJson);
+    row.querySelector(".f-required").addEventListener("change", syncStructuredToJson);
+    row.querySelector(".f-remove").addEventListener("click", () => { fields.splice(i, 1); renderFieldRows(fields); syncStructuredToJson(); });
+    el.appendChild(row);
+  });
+  el._fields = fields;
+}
+
+function renderOfficeRows(offices) {
+  const el = document.getElementById("officeRows");
+  el.innerHTML = "";
+  const esc2 = (v) => String(v ?? "").replace(/"/g, "&quot;");
+  offices.forEach((o, i) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:grid; grid-template-columns: 1fr 1fr; gap:6px; border:1px solid var(--line); border-radius:6px; padding:8px; position:relative;";
+    row.innerHTML = `
+      <input type="text" class="o-country" placeholder="Country" value="${esc2(o.country)}" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <input type="text" class="o-city" placeholder="City" value="${esc2(o.city)}" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <input type="text" class="o-address" placeholder="Address" value="${esc2(o.address)}" style="grid-column:1 / -1; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <input type="text" class="o-phone" placeholder="Phone" value="${esc2(o.phone)}" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <input type="text" class="o-email" placeholder="Email" value="${esc2(o.email)}" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <input type="text" class="o-hours" placeholder="Hours (e.g. Mon–Fri 9am–6pm)" value="${esc2(o.hours)}" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <input type="text" class="o-destinations" placeholder="Serves destinations (comma-separated)" value="${esc2(Array.isArray(o.servesDestinations) ? o.servesDestinations.join(", ") : "")}" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px;" />
+      <button class="o-remove" style="grid-column:1 / -1; justify-self:end;">✕ Remove office</button>`;
+    row.querySelectorAll("input").forEach((input) => input.addEventListener("input", syncStructuredToJson));
+    row.querySelector(".o-remove").addEventListener("click", () => { offices.splice(i, 1); renderOfficeRows(offices); syncStructuredToJson(); });
+    el.appendChild(row);
+  });
+  el._offices = offices;
+}
+
+function readQuestionsFromDom() {
+  return [...document.querySelectorAll("#questionRows .q-input")].map((i) => i.value).filter((v) => v.trim());
+}
+function readFieldsFromDom() {
+  return [...document.querySelectorAll("#fieldRows > div")].map((row) => ({
+    key: row.querySelector(".f-key").value.trim(),
+    label: row.querySelector(".f-label").value.trim(),
+    required: row.querySelector(".f-required").checked,
+  })).filter((f) => f.key);
+}
+function readOfficesFromDom() {
+  return [...document.querySelectorAll("#officeRows > div")].map((row) => ({
+    country: row.querySelector(".o-country").value.trim(),
+    city: row.querySelector(".o-city").value.trim(),
+    address: row.querySelector(".o-address").value.trim(),
+    phone: row.querySelector(".o-phone").value.trim(),
+    email: row.querySelector(".o-email").value.trim(),
+    hours: row.querySelector(".o-hours").value.trim(),
+    servesDestinations: row.querySelector(".o-destinations").value.split(",").map((s) => s.trim()).filter(Boolean),
+  })).filter((o) => o.country || o.city || o.address);
+}
+function readCountriesFromDom() {
+  const val = document.getElementById("countriesInput").value || "";
+  return val.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function readDataResidencyFromDom() {
+  const dbUrl = document.getElementById("residencyDbUrl").value.trim();
+  const qdrantUrl = document.getElementById("residencyQdrantUrl").value.trim();
+  const qdrantApiKey = document.getElementById("residencyQdrantKey").value.trim();
+  const qdrantCollection = document.getElementById("residencyQdrantCollection").value.trim();
+  const out = {};
+  if (dbUrl) out.databaseUrl = dbUrl;
+  if (qdrantUrl) out.qdrantUrl = qdrantUrl;
+  if (qdrantApiKey) out.qdrantApiKey = qdrantApiKey;
+  if (qdrantCollection) out.qdrantCollection = qdrantCollection;
+  return out;
+}
+
+function syncStructuredToJson() {
+  const editor = document.getElementById("tenantEditor");
+  editor.value = applyStructuredToJsonText(editor.value, readQuestionsFromDom(), readFieldsFromDom(), readThemeFromDom(), readOfficesFromDom(), readCountriesFromDom(), readDataResidencyFromDom());
+}
+
+function syncJsonToStructured() {
+  const editor = document.getElementById("tenantEditor");
+  const { questions, fields, theme, offices, countries, dataResidency } = getStructuredFromJsonText(editor.value || "{}");
+  renderQuestionRows(questions);
+  renderFieldRows(fields);
+  renderThemeRows(theme);
+  renderOfficeRows(offices);
+  document.getElementById("countriesInput").value = countries.join(", ");
+  document.getElementById("residencyDbUrl").value = dataResidency.databaseUrl || "";
+  document.getElementById("residencyQdrantUrl").value = dataResidency.qdrantUrl || "";
+  document.getElementById("residencyQdrantKey").value = dataResidency.qdrantApiKey || "";
+  document.getElementById("residencyQdrantCollection").value = dataResidency.qdrantCollection || "";
+}
+
+document.getElementById("addQuestionBtn").addEventListener("click", () => {
+  const questions = readQuestionsFromDom();
+  questions.push("");
+  renderQuestionRows(questions);
+});
+document.getElementById("addFieldBtn").addEventListener("click", () => {
+  const fields = readFieldsFromDom();
+  fields.push({ key: "", label: "", required: false });
+  renderFieldRows(fields);
+});
+document.getElementById("countriesInput").addEventListener("input", syncStructuredToJson);
+["residencyDbUrl", "residencyQdrantUrl", "residencyQdrantKey", "residencyQdrantCollection"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", syncStructuredToJson);
+});
+
+document.getElementById("addOfficeBtn").addEventListener("click", () => {
+  const offices = readOfficesFromDom();
+  offices.push({ country: "", city: "", address: "", phone: "", email: "", hours: "", servesDestinations: [] });
+  renderOfficeRows(offices);
+});
+document.getElementById("reloadFromJsonBtn").addEventListener("click", syncJsonToStructured);
+
+function renderEmbedSnippet(tenantId, widgetKey) {
+  const keyAttr = widgetKey ? ` data-tenant-key="${widgetKey}"` : "";
+  const snippet = `<script src="${window.location.origin}/widget.js" data-tenant="${tenantId}"${keyAttr}><\/script>`;
+  document.getElementById("embedSnippet").value = snippet;
+  document.getElementById("embedCopyStatus").textContent = widgetKey ? "" : "No widget key set yet — save this tenant once to generate one.";
+}
+
+async function loadTenantIntoEditor(id) {
+  const editor = document.getElementById("tenantEditor");
+  const status = document.getElementById("editorStatus");
+  if (!id) {
+    editor.value = ""; editor.dataset.id = ""; renderQuestionRows([]); renderFieldRows([]); renderOfficeRows([]);
+    document.getElementById("countriesInput").value = "";
+    document.getElementById("embedSnippet").value = "";
+    document.getElementById("embedCopyStatus").textContent = "";
+    ["residencyDbUrl", "residencyQdrantUrl", "residencyQdrantKey", "residencyQdrantCollection"].forEach((fid) => { document.getElementById(fid).value = ""; });
+    return;
+  }
+  status.textContent = "Loading…";
+  status.className = "status-line";
+  try {
+    const data = await api(`/api/admin/tenant/${encodeURIComponent(id)}`);
+    editor.value = data.content;
+    editor.dataset.id = id;
+    status.textContent = `Editing "${id}"`;
+    syncJsonToStructured();
+    const parsed = JSON.parse(data.content);
+    renderEmbedSnippet(id, parsed.tenant_meta?.widgetKey);
+  } catch (err) {
+    status.textContent = `Failed to load: ${err.message}`;
+    status.className = "status-line err";
+  }
+}
+
+document.getElementById("tenantPicker").addEventListener("change", (e) => loadTenantIntoEditor(e.target.value));
+
+document.getElementById("copyEmbedBtn").addEventListener("click", async () => {
+  const el = document.getElementById("embedSnippet");
+  const status = document.getElementById("embedCopyStatus");
+  if (!el.value) return;
+  try {
+    await navigator.clipboard.writeText(el.value);
+    status.textContent = "Copied";
+  } catch {
+    el.select();
+    status.textContent = "Select-all — copy failed (clipboard permission?)";
+  }
+  setTimeout(() => { status.textContent = ""; }, 2500);
+});
+
+document.getElementById("regenerateKeyBtn").addEventListener("click", async () => {
+  const id = document.getElementById("tenantEditor").dataset.id;
+  const status = document.getElementById("embedCopyStatus");
+  if (!id) { status.textContent = "Select a tenant first"; return; }
+  if (!confirm(`Regenerate the widget key for "${id}"? Any site still using the old key will be blocked from the chat API until it's updated with the new snippet.`)) return;
+  status.textContent = "Regenerating…";
+  try {
+    const data = await api(`/api/admin/tenant/${encodeURIComponent(id)}/regenerate-widget-key`, { method: "POST" });
+    renderEmbedSnippet(id, data.widgetKey);
+    // Keep the raw JSON editor in sync too, so a save right after doesn't
+    // accidentally write back the now-stale key that was in there before.
+    const parsed = JSON.parse(document.getElementById("tenantEditor").value || "{}");
+    parsed.tenant_meta = parsed.tenant_meta || {};
+    parsed.tenant_meta.widgetKey = data.widgetKey;
+    document.getElementById("tenantEditor").value = JSON.stringify(parsed, null, 2);
+    status.textContent = "Regenerated";
+    setTimeout(() => { status.textContent = ""; }, 2500);
+  } catch (err) {
+    status.textContent = `Failed: ${err.message}`;
+  }
+});
+
+document.getElementById("newTenantBtn").addEventListener("click", () => {
+  const id = prompt("New tenant id (letters, numbers, - and _ only):");
+  if (!id) return;
+  const editor = document.getElementById("tenantEditor");
+  editor.dataset.id = id.trim();
+  editor.value = JSON.stringify({
+    tenant_meta: {
+      vertical: "survey",
+      widget_title: "Insight Bot",
+      widget_subtitle: "Assistant",
+      persona: "",
+      provider: {},
+      allowedOrigins: [],
+      booking: {
+        fields: [
+          { key: "name", label: "Full name", required: true },
+          { key: "email", label: "Email address", required: true },
+          { key: "preferredTime", label: "Preferred date/time for a call", required: false }
+        ]
+      },
+      integrations: {
+        email: { enabled: false, smtpHost: "smtp.gmail.com", smtpPort: 465, user: "", pass: "", to: "" },
+        whatsapp: { enabled: false, phoneNumberId: "", accessToken: "", to: "" },
+        webhook: { enabled: false, url: "", headers: { "X-Webhook-Secret": "" } }
+      }
+    },
+    suggested_questions: [],
+    survey_meta: { title: "" }
+  }, null, 2);
+  document.getElementById("tenantPicker").value = "";
+  document.getElementById("editorStatus").textContent = `Creating new tenant "${id.trim()}" — edit below, then Save.`;
+  syncJsonToStructured();
+});
+
+document.getElementById("saveTenantBtn").addEventListener("click", async () => {
+  const editor = document.getElementById("tenantEditor");
+  const status = document.getElementById("editorStatus");
+  const id = editor.dataset.id;
+  if (!id) { status.textContent = "Pick or create a tenant first."; status.className = "status-line err"; return; }
+  status.textContent = "Saving…";
+  status.className = "status-line";
+  try {
+    const data = await api(`/api/admin/tenant/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: editor.value }),
+    });
+    if (!data.ok) throw new Error(data.error || "Unknown error");
+    status.textContent = `✓ Saved${data.created ? " (new tenant)" : ""} and reloaded: ${data.tenantIds.join(", ")}`;
+    status.className = "status-line ok";
+    loadTenantPicker();
+    loadOverview();
+  } catch (err) {
+    status.textContent = `✗ ${err.message}`;
+    status.className = "status-line err";
+  }
+});
+
+async function loadOverview() {
+  const el = document.getElementById("tenantsBody");
+  try {
+    const data = await api("/api/admin/overview");
+    document.getElementById("tenantCount").textContent = `${data.tenantCount} loaded · rate limit ${data.rateLimitPerMinute}/min`;
+    const unprotected = data.tenants.filter((t) => t.unprotectedOrigin);
+    const banner = document.getElementById("originWarningBanner");
+    banner.innerHTML = unprotected.length
+      ? `<div class="panel" style="border-color: var(--danger); margin-bottom: 16px;">
+           <div class="panel-body" style="color: var(--danger); font-weight: 600;">
+             ⚠ ${unprotected.length} tenant${unprotected.length > 1 ? "s have" : " has"} no allowedOrigins set —
+             ${unprotected.map((t) => esc(t.id)).join(", ")}. Their /api/chat is callable from any website. Set allowedOrigins before going live.
+           </div>
+         </div>`
+      : "";
+    if (!data.tenants.length) { el.innerHTML = '<div class="empty">No tenants loaded.</div>'; return; }
+    el.innerHTML = `<table>
+      <thead><tr><th>Tenant</th><th>Survey</th><th>Providers</th><th>Primary models</th><th>Chips</th><th>Origins</th><th>Channels</th></tr></thead>
+      <tbody>${data.tenants.map((t) => `
+        <tr>
+          <td><strong>${esc(t.id)}</strong><br><span class="status-line">${esc(t.title)}</span></td>
+          <td>${esc(t.surveyTitle || "—")}</td>
+          <td>${t.providerCount}</td>
+          <td class="mono">${t.primaryModels.map(esc).join("<br>")}</td>
+          <td>${t.suggestedQuestionCount}</td>
+          <td>${t.unprotectedOrigin ? '<span class="badge danger" title="Any website can embed this tenant\'s chatbot and call its API. Set allowedOrigins before going live.">⚠ unprotected — any origin</span>' : `<span class="badge locked">${t.allowedOrigins.length} allowed</span>`}</td>
+          <td>${t.enabledIntegrations.length ? t.enabledIntegrations.map(esc).join(", ") : '<span class="status-line">none</span>'}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>`;
+  } catch (err) {
+    el.innerHTML = `<div class="empty">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+function renderLogTabs() {
+  const el = document.getElementById("logTabs");
+  el.innerHTML = LOG_TYPES.map((t) => `<button data-type="${t}" class="${t === activeLogType ? "active" : ""}">${t}</button>`).join("");
+  el.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      activeLogType = btn.dataset.type;
+      renderLogTabs();
+      loadLogs();
+    });
+  });
+}
+
+const COLUMN_PRIORITY = ["timestamp", "tenantId", "sessionId", "intent", "type", "rating", "context", "email", "userMessage", "assistantResponse", "message", "notes"];
+const LONG_TEXT_FIELDS = new Set(["userMessage", "assistantResponse", "message", "notes", "details", "text"]);
+let currentLogEntries = [];
+
+function orderedColumns(entries) {
+  const keySet = new Set();
+  for (const e of entries) for (const k of Object.keys(e)) keySet.add(k);
+  const keys = [...keySet];
+  const priority = COLUMN_PRIORITY.filter((k) => keys.includes(k));
+  const rest = keys.filter((k) => !priority.includes(k)).sort();
+  return [...priority, ...rest];
+}
+
+function renderLogTable(entries) {
+  if (!entries.length) return '<div class="empty">No entries yet.</div>';
+  const cols = orderedColumns(entries);
+  const showViewAction = activeLogType === "conversations" && entries.some((e) => e.sessionId);
+  const rows = entries.map((e) => {
+    const cells = cols.map((c) => {
+      const raw = e[c];
+      const isLong = LONG_TEXT_FIELDS.has(c);
+      const text = raw === undefined || raw === null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+      const cls = c === "timestamp" ? "ts" : isLong ? "wrap" : "";
+      const display = isLong && text.length > 140 ? esc(text.slice(0, 140)) + "…" : esc(text);
+      return `<td class="${cls}" title="${esc(text)}">${display}</td>`;
+    }).join("");
+    const viewCell = showViewAction
+      ? (e.sessionId ? `<td><button class="view-convo-btn" data-session="${esc(e.sessionId)}" data-tenant="${esc(e.tenantId || "")}">View chat</button></td>` : "<td></td>")
+      : "";
+    return `<tr>${cells}${viewCell}</tr>`;
+  }).join("");
+  const head = cols.map((c) => `<th>${esc(c)}</th>`).join("") + (showViewAction ? "<th></th>" : "");
+  return `<div class="log-table-wrap"><table class="log-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function toCsv(entries) {
+  if (!entries.length) return "";
+  const cols = orderedColumns(entries);
+  const escCsv = (v) => {
+    const s = v === undefined || v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = cols.map(escCsv).join(",");
+  const rows = entries.map((e) => cols.map((c) => escCsv(e[c])).join(","));
+  return [header, ...rows].join("\n");
+}
+
+document.getElementById("exportJsonBtn").addEventListener("click", () => {
+  downloadFile(`${activeLogType}-export.json`, JSON.stringify(currentLogEntries, null, 2), "application/json");
+});
+document.getElementById("exportCsvBtn").addEventListener("click", () => {
+  downloadFile(`${activeLogType}-export.csv`, toCsv(currentLogEntries), "text/csv");
+});
+
+async function loadLogs() {
+  const el = document.getElementById("logsBody");
+  const n = document.getElementById("logLimit").value;
+  el.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const data = await api(`/api/admin/logs?type=${activeLogType}&n=${n}`);
+    currentLogEntries = data.entries;
+    el.innerHTML = renderLogTable(data.entries);
+    el.querySelectorAll(".view-convo-btn").forEach((btn) => {
+      btn.addEventListener("click", () => AdminShell.openConversationTranscript(btn.dataset.session, btn.dataset.tenant));
+    });
+  } catch (err) {
+    el.innerHTML = `<div class="empty">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+document.getElementById("reloadBtn").addEventListener("click", async () => {
+  const status = document.getElementById("reloadStatus");
+  const btn = document.getElementById("reloadBtn");
+  btn.disabled = true;
+  status.textContent = "Reloading…";
+  status.className = "status-line";
+  try {
+    const data = await api("/api/admin/reload-tenants", { method: "POST" });
+    if (!data.ok) throw new Error(data.error || "Unknown error");
+    status.textContent = `✓ Reloaded: ${data.tenantIds.join(", ")}`;
+    status.className = "status-line ok";
+    loadOverview();
+  } catch (err) {
+    status.textContent = `✗ ${err.message} (previous config still live)`;
+    status.className = "status-line err";
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("refreshLogsBtn").addEventListener("click", loadLogs);
+document.getElementById("logLimit").addEventListener("change", loadLogs);
+
+renderLogTabs();
+loadOverview();
+loadTenantPicker();
+loadLogs();
+</script>
+</body>
+</html>

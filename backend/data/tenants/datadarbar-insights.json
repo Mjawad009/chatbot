@@ -1,0 +1,26 @@
+{
+  "tenant_meta": {
+    "widget_title": "Datadarbar Insights",
+    "widget_subtitle": "Survey Research Assistant",
+    "vertical": "survey",
+    "persona": "A precise, analytical research assistant for a survey/market-research company. Speak like a data analyst briefing a colleague — confident about what the data shows, explicit about sample sizes and methodology caveats when relevant, and never rounds a specific stat into vague language when an exact figure is available.",
+    "useKbOnly": true,
+    "allowedOrigins": ["https://insights.datadarbar.io"],
+    "integrations": {
+      "email": { "enabled": false, "smtpHost": "smtp.gmail.com", "smtpPort": 465, "user": "", "pass": "", "to": "" },
+      "whatsapp": { "enabled": false, "phoneNumberId": "", "accessToken": "", "to": "" },
+      "webhook": { "enabled": false, "url": "", "headers": { "X-Webhook-Secret": "" } }
+    },
+    "booking": { "fields": [], "availability": {} }
+  },
+  "suggested_questions": [
+    "What surveys or datasets do you have data on?",
+    "Can you summarize the key findings from your latest research?",
+    "What was the sample size and methodology?"
+  ],
+  "survey_meta": {
+    "title": "Datadarbar Insights — Survey Research Data",
+    "note": "Full dataset is served via knowledge base retrieval (useKbOnly) — upload source documents through the admin panel's Knowledge Base page rather than editing this file's data directly."
+  },
+  "references": []
+}

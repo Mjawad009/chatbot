@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Demo — Datadarbar Insights</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 40px 20px; }
+  .wrap { max-width: 640px; margin: 0 auto; }
+  h1 { color: #1e293b; font-size: 22px; }
+  p { color: #64748b; line-height: 1.6; }
+  code { background: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  .note { background: #fff; border: 1px solid #e2e8f0; border-left: 3px solid #C99A4B; border-radius: 8px; padding: 14px 16px; font-size: 13px; color: #475569; margin-top: 20px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Datadarbar Insights</h1>
+    <p>
+      This is a placeholder host page for the <strong>"datadarbar-insights"</strong> tenant. The entire chat
+      widget — including all styling, dependencies, and behavior — is loaded from a single embed script below.
+      Nothing else on this page is required. On the real site, this same one-line embed goes on
+      <code>insights.datadarbar.io</code>.
+    </p>
+    <p><code>&lt;script src="/widget.js" data-tenant="datadarbar-insights"&gt;&lt;/script&gt;</code></p>
+    <div class="note">
+      This tenant is configured with <code>useKbOnly: true</code> — it has no baked-in dataset in its
+      system prompt. Answers depend entirely on documents uploaded via the admin panel's Knowledge Base
+      page (Qdrant-backed retrieval). Until real survey documents are uploaded and indexed, expect the bot
+      to say it doesn't have that information yet, rather than guessing.
+    </div>
+  </div>
+
+  <!-- This single line is the entire integration a tenant site needs. -->
+  <script src="/widget.js" data-tenant="datadarbar-insights"></script>
+</body>
+</html>

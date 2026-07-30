@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Insight Bot — Analytics</title>
+<link rel="stylesheet" href="/admin-assets/shared.css" />
+<style>
+  .filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button.link { background: none; border: none; color: var(--gold); text-decoration: none; padding: 0; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 6px; }
+  .card h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); font-weight: 600; }
+  .card .big { font-family: var(--font-display); font-size: 28px; font-weight: 700; }
+  .card .sub { font-size: 12px; color: var(--text-dim); }
+  .card .note { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; line-height: 1.4; border-top: 1px solid var(--line); padding-top: 8px; }
+  .card.unavailable { opacity: 0.6; }
+  .card .badge-proxy { display: inline-block; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--gold-soft); color: var(--gold); margin-left: 6px; vertical-align: middle; }
+  .card .badge-unavailable { display: inline-block; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--danger-soft); color: var(--danger); }
+
+  .section-title { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin: 4px 0 -6px; }
+  .breakdown-row { display: flex; justify-content: space-between; font-size: 12.5px; padding: 3px 0; }
+  .breakdown-row span:last-child { color: var(--text-dim); font-family: var(--mono); }
+
+  .log-table-wrap { overflow-x: auto; }
+  table.log-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.log-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--text-dim); font-weight: 500; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.4px; white-space: nowrap; }
+  table.log-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+  table.log-table tr:hover td { background: var(--panel-2); }
+</style>
+</head>
+<body>
+
+
+<div id="main">
+  <div class="empty">Loading…</div>
+</div>
+
+<script src="/admin-assets/shared.js"></script>
+<script>
+AdminShell.mount({
+  active: "analytics",
+  title: "Leads & Analytics",
+  subtitle: "Usage, cost, and lead activity across tenants.",
+  actions: `
+    <div class="filters">
+      <select id="tenantFilter"><option value="all">All tenants</option></select>
+      <select id="rangeFilter">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="all">All time</option>
+      </select>
+      <button id="refreshBtn">Refresh</button>
+    </div>
+  `,
+});
+
+async function api(path) {
+  let res;
+  try {
+    res = await fetch(path, { credentials: "same-origin", signal: AbortSignal.timeout(15_000) });
+  } catch (err) {
+    throw new Error(err.name === "TimeoutError" ? "Request timed out." : "Network error — couldn't reach the server.");
+  }
+  if (res.status === 401) { window.location.href = "/admin/login"; throw new Error("Session expired."); }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { const b = await res.json(); if (b?.error) detail = b.error; } catch {}
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c])); }
+function pct(n) { return n === null || n === undefined ? "—" : `${Math.round(n * 100)}%`; }
+function num(n) { return n === null || n === undefined ? "—" : n.toLocaleString(); }
+function usd(n) { return n === null || n === undefined ? "—" : `$${n < 0.01 && n > 0 ? n.toFixed(4) : n.toFixed(2)}`; }
+function ms(n) { return n === null || n === undefined ? "—" : `${n.toLocaleString()}ms`; }
+
+async function loadTenantFilter() {
+  const sel = document.getElementById("tenantFilter");
+  try {
+    const data = await api("/api/admin/overview");
+    for (const t of data.tenants) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.id;
+      sel.appendChild(opt);
+    }
+  } catch { /* filter still works with just "all" */ }
+}
+
+function card(title, big, sub, extra) {
+  return `<div class="card"><h3>${esc(title)}</h3><div class="big">${big}</div>${sub ? `<div class="sub">${sub}</div>` : ""}${extra || ""}</div>`;
+}
+
+async function loadAnalytics() {
+  const main = document.getElementById("main");
+  const tenantId = document.getElementById("tenantFilter").value;
+  const days = document.getElementById("rangeFilter").value;
+  main.innerHTML = '<div class="empty">Loading…</div>';
+
+  try {
+    const d = await api(`/api/admin/analytics?tenantId=${encodeURIComponent(tenantId)}&days=${days}`);
+
+    const intentRows = Object.entries(d.automationUsage.intentBreakdown)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `<div class="breakdown-row"><span>${esc(k)}</span><span>${v}</span></div>`)
+      .join("") || '<div class="sub">No guardrail-handled turns in range.</div>';
+
+    main.innerHTML = `
+      <div class="section-title">Volume &amp; automation</div>
+      <div class="grid">
+        ${card("Questions asked", num(d.questionsAsked.total), `${num(d.questionsAsked.llmHandled)} answered by LLM · ${num(d.questionsAsked.guardrailHandled)} handled instantly`)}
+        ${card("Automation usage", pct(d.automationUsage.guardrailHandledPct), "of turns handled without an LLM call", `<div class="note">${intentRows}</div>`)}
+        ${card("Unanswered questions <span class=\'badge-proxy\'>proxy</span>", num(d.unansweredProxy.thumbsDown), "thumbs-down count", `<div class="note">${esc(d.unansweredProxy.note)}</div>`)}
+        ${card("Lead generation", num(d.leadGeneration.total), `${num(d.leadGeneration.bookings)} bookings · ${num(d.leadGeneration.escalations)} escalations${d.automationUsage.notifierFailures ? ` · ${d.automationUsage.notifierFailures} delivery failures` : ""}`)}
+      </div>
+
+      <div class="section-title">Quality signals</div>
+      <div class="grid">
+        ${card("AI accuracy <span class=\'badge-proxy\'>proxy</span>", pct(d.aiAccuracyProxy.helpfulRate), `${d.aiAccuracyProxy.thumbsUp}👍 / ${d.aiAccuracyProxy.thumbsDown}👎 (n=${d.aiAccuracyProxy.sampleSize})`, `<div class="note">${esc(d.aiAccuracyProxy.note)}</div>`)}
+        ${card("Customer satisfaction <span class=\'badge-proxy\'>proxy</span>", pct(d.customerSatisfactionProxy.helpfulRate), `n=${d.customerSatisfactionProxy.sampleSize} responses rated`, `<div class="note">${esc(d.customerSatisfactionProxy.note)}</div>`)}
+        <div class="card unavailable"><h3>Popular documents <span class="badge-unavailable">unavailable</span></h3><div class="big">—</div><div class="note">${esc(d.popularDocuments.reason)}</div></div>
+      </div>
+
+      <div class="section-title">Performance &amp; cost</div>
+      <div class="grid">
+        ${card("Response time", ms(d.responseTimeMs.avg), `median ${ms(d.responseTimeMs.median)} · p95 ${ms(d.responseTimeMs.p95)} (n=${d.responseTimeMs.sampleSize})`)}
+        ${card("Token usage", num(d.tokenUsage.totalTokens), `avg ${num(d.tokenUsage.avgPerConversation)}/conversation · ${num(d.tokenUsage.totalPromptTokens)} prompt + ${num(d.tokenUsage.totalCompletionTokens)} completion`)}
+        ${card("Cost per conversation", usd(d.costPerConversation.avgUsd), `total ${usd(d.costPerConversation.totalUsd)} across ${d.costPerConversation.sampleSize} conversations${d.costPerConversation.unknownCostCount ? ` · ${d.costPerConversation.unknownCostCount} unpriced model calls` : ""}`, `<div class="note">${esc(d.costPerConversation.note)}${d.costEstimatePricing ? ` Pricing as of ${esc(d.costEstimatePricing.lastVerified)} (${esc(d.costEstimatePricing.source)}) — update data/model-pricing.json if rates have changed.` : ""}</div>`)}
+      </div>
+
+      <div class="section-title">Recent conversations (detail)</div>
+      <div class="card" style="padding:0;">
+        <div id="recentActivity" style="padding:16px;"><div class="empty">Loading…</div></div>
+      </div>
+    `;
+
+    loadRecentActivity(tenantId);
+  } catch (err) {
+    main.innerHTML = `<div class="empty">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+async function loadRecentActivity(tenantId) {
+  const el = document.getElementById("recentActivity");
+  if (!el) return;
+  try {
+    const data = await api(`/api/admin/logs?type=conversations&tenantId=${encodeURIComponent(tenantId)}&n=50`);
+    if (!data.entries.length) { el.innerHTML = '<div class="empty">No conversations in range yet.</div>'; return; }
+    const cols = ["timestamp", "tenantId", "userMessage", "responseLength", "durationMs", "promptTokens", "completionTokens", "estimatedCostUsd", "guardrail", "intent"];
+    const rows = data.entries.map((e) => {
+      const cells = cols.map((c) => {
+        const raw = e[c];
+        const text = raw === undefined || raw === null ? "—" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+        const display = c === "userMessage" && text.length > 60 ? esc(text.slice(0, 60)) + "…" : esc(text);
+        return `<td title="${esc(text)}">${display}</td>`;
+      }).join("");
+      const viewCell = e.sessionId
+        ? `<td><button class="view-convo-btn" data-session="${esc(e.sessionId)}" data-tenant="${esc(e.tenantId || "")}">View chat</button></td>`
+        : `<td></td>`;
+      return `<tr>${cells}${viewCell}</tr>`;
+    }).join("");
+    const head = cols.map((c) => `<th>${esc(c)}</th>`).join("") + "<th></th>";
+    el.innerHTML = `<div class="log-table-wrap"><table class="log-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+    el.querySelectorAll(".view-convo-btn").forEach((btn) => {
+      btn.addEventListener("click", () => AdminShell.openConversationTranscript(btn.dataset.session, btn.dataset.tenant));
+    });
+  } catch (err) {
+    el.innerHTML = `<div class="empty">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+document.getElementById("refreshBtn").addEventListener("click", loadAnalytics);
+document.getElementById("tenantFilter").addEventListener("change", loadAnalytics);
+document.getElementById("rangeFilter").addEventListener("change", loadAnalytics);
+
+loadTenantFilter().then(loadAnalytics);
+</script>
+</body>
+</html>
