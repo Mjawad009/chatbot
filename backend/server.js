@@ -230,9 +230,20 @@ async function buildTenantsMap() {
         { apiUrl: globalDefaults.apiUrl, apiKey: providerChain[0]?.apiKey || globalDefaults.apiKey, model: globalDefaults.internalModel }
       );
 
-      // Always append one more safety-net models array on the primary provider's own apiUrl/key,
-      // widening OpenRouter's own in-request fallback without needing tenant config.
-      if (providerChain[0] && providerChain[0].apiUrl === globalDefaults.apiUrl) {
+      // Safety-net models: only for tenants that never configured their own
+      // model list at all (tenant_meta.provider missing, or present but with
+      // no `models` array) — i.e. tenants still running on pure global
+      // defaults. Previously this ran unconditionally and silently appended
+      // to whatever models an admin had explicitly set via
+      // tenant_meta.provider.models, including via the admin panel — an
+      // admin removing a model from the list would see it come right back
+      // on the next reload. Now: set your own models and the platform
+      // leaves them alone; leave models unset and you still get a sane
+      // multi-model default so a zero-config tenant isn't dead on arrival.
+      const tenantExplicitlySetModels = Boolean(
+        tenant_meta.provider && Array.isArray(tenant_meta.provider.models) && tenant_meta.provider.models.length > 0
+      );
+      if (!tenantExplicitlySetModels && providerChain[0] && providerChain[0].apiUrl === globalDefaults.apiUrl) {
         const extras = ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"].filter(
           (m) => !providerChain[0].models.includes(m)
         );
