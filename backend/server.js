@@ -233,7 +233,7 @@ async function buildTenantsMap() {
       // Always append one more safety-net models array on the primary provider's own apiUrl/key,
       // widening OpenRouter's own in-request fallback without needing tenant config.
       if (providerChain[0] && providerChain[0].apiUrl === globalDefaults.apiUrl) {
-        const extras = ["deepseek/deepseek-r1:free", "qwen/qwen-2.5-72b-instruct:free"].filter(
+        const extras = ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"].filter(
           (m) => !providerChain[0].models.includes(m)
         );
         providerChain[0].models = [...providerChain[0].models, ...extras];
