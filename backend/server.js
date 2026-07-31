@@ -1359,6 +1359,7 @@ app.post("/api/chat", async (req, res) => {
 function startServer() {
   app.listen(PORT, () => {
     console.log(`🚀 Insight Bot backend running at http://localhost:${PORT}`);
+    console.log(`   Build marker: provider-models-fix-2026-07-31 (if you don't see this exact line on Railway, the deploy didn't pick up the latest server.js)`);
     console.log(`   Tenants loaded: ${[...tenants.keys()].join(", ")}`);
     console.log(`   Widget embed script: http://localhost:${PORT}/widget.js`);
     if (process.env.REDIS_URL) {
