@@ -141,14 +141,19 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
           messages: payloadMessagesBuilder(),
           stream: true,
           stream_options: { include_usage: true }, // asks for a final chunk with real prompt/completion token counts
-          // Gemini 2.5 models support a "thinking" pass that's billed as
-          // output tokens — OpenRouter leaves it off by default unless
-          // requested, but we set this explicitly rather than rely on that
-          // default staying true. This is a grounded-Q&A chatbot, not a
-          // multi-step reasoning task; thinking adds cost and latency here
-          // without improving answer quality. Harmless to send to
-          // non-Gemini models too — OpenRouter ignores unsupported params.
-          ...(provider.models.some((m) => m.includes("gemini")) ? { reasoning: { max_tokens: 0 } } : {}),
+          // Reasoning-capable models (Gemini 2.5, Nemotron 3 Ultra,
+          // DeepSeek-R1, and others) stream their internal "thinking" in a
+          // separate reasoning_content field that this code never reads —
+          // only delta.content is captured below. If a reasoning model
+          // spends its whole token budget thinking before emitting real
+          // content, fullResponseText stays empty and the whole attempt
+          // gets reported as "returned no content", even though the
+          // request itself succeeded. This is a grounded Q&A chatbot, not
+          // a task that benefits from visible-to-us reasoning, so turn it
+          // off unconditionally rather than trying to pattern-match model
+          // names — OpenRouter ignores this param on models that don't
+          // support it, so it's harmless to send everywhere.
+          reasoning: { max_tokens: 0 },
         }),
       });
 
