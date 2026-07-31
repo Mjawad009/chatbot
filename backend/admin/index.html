@@ -101,6 +101,26 @@
 
       <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="font-size:12.5px;">LLM provider / models</strong>
+        </div>
+        <div class="status-line" style="margin-bottom:8px;">
+          Models are tried on OpenRouter in the order listed, left to right, on every chat turn. Once you set
+          any models here, the platform's automatic free-model safety net is skipped entirely for this tenant —
+          this list is exactly what gets requested, nothing added silently. Leave blank to keep using the
+          platform default chain (Gemini 2.5 Flash + a couple of built-in free fallbacks).
+        </div>
+        <div style="display:flex; flex-direction:column; gap:4px; margin-bottom:10px;">
+          <label class="status-line">Models (comma-separated OpenRouter slugs, tried in order)</label>
+          <input type="text" id="providerModelsInput" class="mono" placeholder="e.g. google/gemini-2.5-flash, meta-llama/llama-3.3-70b-instruct:free" style="width:100%; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12.5px;" />
+        </div>
+        <div style="display:flex; flex-direction:column; gap:4px;">
+          <label class="status-line">API key env var name (optional — defaults to the platform's global OPENROUTER_API_KEY)</label>
+          <input type="text" id="providerApiKeyEnvInput" class="mono" placeholder="e.g. OPENROUTER_API_KEY_CLIENT_X" style="width:100%; background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:12.5px;" />
+        </div>
+      </div>
+
+      <div style="border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
           <strong style="font-size:12.5px;">Offices</strong>
           <button id="addOfficeBtn">+ Add office</button>
         </div>
@@ -257,13 +277,17 @@ function getStructuredFromJsonText(jsonText) {
       offices: Array.isArray(parsed.offices) ? parsed.offices : [],
       countries: Array.isArray(parsed.servicedCountries) ? parsed.servicedCountries : [],
       dataResidency: parsed.tenant_meta?.dataResidency && typeof parsed.tenant_meta.dataResidency === "object" ? parsed.tenant_meta.dataResidency : {},
+      provider: {
+        models: Array.isArray(parsed.tenant_meta?.provider?.models) ? parsed.tenant_meta.provider.models : [],
+        apiKeyEnv: typeof parsed.tenant_meta?.provider?.apiKeyEnv === "string" ? parsed.tenant_meta.provider.apiKeyEnv : "",
+      },
     };
   } catch {
-    return { questions: [], fields: [], theme: {}, offices: [], countries: [], dataResidency: {} };
+    return { questions: [], fields: [], theme: {}, offices: [], countries: [], dataResidency: {}, provider: { models: [], apiKeyEnv: "" } };
   }
 }
 
-function applyStructuredToJsonText(jsonText, questions, fields, theme, offices, countries, dataResidency) {
+function applyStructuredToJsonText(jsonText, questions, fields, theme, offices, countries, dataResidency, provider) {
   let parsed;
   try {
     parsed = JSON.parse(jsonText);
@@ -286,6 +310,18 @@ function applyStructuredToJsonText(jsonText, questions, fields, theme, offices, 
   else delete parsed.offices;
   if (countries && countries.length) parsed.servicedCountries = countries;
   else delete parsed.servicedCountries;
+  // Merge rather than replace — this preserves fields set directly in the
+  // raw JSON (apiUrl, fallbackProviders) that the structured form doesn't
+  // expose, while still letting the models/apiKeyEnv inputs above win for
+  // the fields they DO control.
+  const existingProvider = parsed.tenant_meta.provider && typeof parsed.tenant_meta.provider === "object" ? parsed.tenant_meta.provider : {};
+  const mergedProvider = { ...existingProvider };
+  if (provider && provider.models && provider.models.length) mergedProvider.models = provider.models;
+  else delete mergedProvider.models;
+  if (provider && provider.apiKeyEnv) mergedProvider.apiKeyEnv = provider.apiKeyEnv;
+  else delete mergedProvider.apiKeyEnv;
+  if (Object.keys(mergedProvider).length) parsed.tenant_meta.provider = mergedProvider;
+  else delete parsed.tenant_meta.provider;
   return JSON.stringify(parsed, null, 2);
 }
 
@@ -421,6 +457,15 @@ function readCountriesFromDom() {
   return val.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+function readProviderFromDom() {
+  const modelsRaw = document.getElementById("providerModelsInput").value || "";
+  const apiKeyEnv = (document.getElementById("providerApiKeyEnvInput").value || "").trim();
+  return {
+    models: modelsRaw.split(",").map((s) => s.trim()).filter(Boolean),
+    apiKeyEnv,
+  };
+}
+
 function readDataResidencyFromDom() {
   const dbUrl = document.getElementById("residencyDbUrl").value.trim();
   const qdrantUrl = document.getElementById("residencyQdrantUrl").value.trim();
@@ -436,12 +481,12 @@ function readDataResidencyFromDom() {
 
 function syncStructuredToJson() {
   const editor = document.getElementById("tenantEditor");
-  editor.value = applyStructuredToJsonText(editor.value, readQuestionsFromDom(), readFieldsFromDom(), readThemeFromDom(), readOfficesFromDom(), readCountriesFromDom(), readDataResidencyFromDom());
+  editor.value = applyStructuredToJsonText(editor.value, readQuestionsFromDom(), readFieldsFromDom(), readThemeFromDom(), readOfficesFromDom(), readCountriesFromDom(), readDataResidencyFromDom(), readProviderFromDom());
 }
 
 function syncJsonToStructured() {
   const editor = document.getElementById("tenantEditor");
-  const { questions, fields, theme, offices, countries, dataResidency } = getStructuredFromJsonText(editor.value || "{}");
+  const { questions, fields, theme, offices, countries, dataResidency, provider } = getStructuredFromJsonText(editor.value || "{}");
   renderQuestionRows(questions);
   renderFieldRows(fields);
   renderThemeRows(theme);
@@ -451,6 +496,8 @@ function syncJsonToStructured() {
   document.getElementById("residencyQdrantUrl").value = dataResidency.qdrantUrl || "";
   document.getElementById("residencyQdrantKey").value = dataResidency.qdrantApiKey || "";
   document.getElementById("residencyQdrantCollection").value = dataResidency.qdrantCollection || "";
+  document.getElementById("providerModelsInput").value = (provider.models || []).join(", ");
+  document.getElementById("providerApiKeyEnvInput").value = provider.apiKeyEnv || "";
 }
 
 document.getElementById("addQuestionBtn").addEventListener("click", () => {
@@ -465,6 +512,9 @@ document.getElementById("addFieldBtn").addEventListener("click", () => {
 });
 document.getElementById("countriesInput").addEventListener("input", syncStructuredToJson);
 ["residencyDbUrl", "residencyQdrantUrl", "residencyQdrantKey", "residencyQdrantCollection"].forEach((id) => {
+  document.getElementById(id).addEventListener("input", syncStructuredToJson);
+});
+["providerModelsInput", "providerApiKeyEnvInput"].forEach((id) => {
   document.getElementById(id).addEventListener("input", syncStructuredToJson);
 });
 
