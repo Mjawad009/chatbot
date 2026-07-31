@@ -226,6 +226,16 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
         continue;
       }
 
+      if (!startedStreamingToClient && fullResponseText.length === 0) {
+        lastError = lastError || new Error(`Provider ${i} returned no content`);
+        recordAttempt("no_content", {
+          error: lastError.message,
+          finishReason,
+          rawTail: buffer.slice(0, 300),
+        });
+        continue;
+      }
+
       if (midStreamError && startedStreamingToClient) {
         // Degraded success: real (partial) content is already on the wire.
         // Report it honestly rather than silently trying another provider.
