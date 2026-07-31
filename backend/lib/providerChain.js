@@ -168,6 +168,9 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let sawAnyEvent = false; // did we parse ANY valid SSE data line, even one with no usable content?
+      let lastRawPayload = ""; // most recent parsed event, for diagnosing empty-but-200 responses
+      let reasoningCharsSeen = 0; // separate from fullResponseText — content the model spent tokens on that we deliberately don't stream
 
       readLoop: while (true) {
         const { done, value } = await reader.read();
@@ -184,7 +187,11 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
 
           try {
             const event = JSON.parse(payload);
+            sawAnyEvent = true;
+            lastRawPayload = payload.slice(0, 500);
             const delta = event.choices?.[0]?.delta?.content;
+            const reasoningDelta = event.choices?.[0]?.delta?.reasoning_content;
+            if (typeof reasoningDelta === "string") reasoningCharsSeen += reasoningDelta.length;
             if (typeof delta === "string" && delta.length > 0) {
               if (!startedStreamingToClient) {
                 startedStreamingToClient = true;
@@ -220,18 +227,23 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
       if (clientAbortSignal) clientAbortSignal.removeEventListener("abort", onClientAbort);
 
       if (!startedStreamingToClient && fullResponseText.length === 0) {
-        // Nothing usable came back at all — treat as a failure and try the next provider.
-        lastError = lastError || new Error(`Provider ${i} returned no content`);
-        recordAttempt("no_content", { error: lastError.message });
-        continue;
-      }
-
-      if (!startedStreamingToClient && fullResponseText.length === 0) {
+        // Nothing usable came back at all — treat as a failure and try the
+        // next provider. Capture WHAT we actually saw so this stops being a
+        // guessing game: zero events at all means an empty/rejected 200
+        // (capacity/rate-limit territory); events with reasoningCharsSeen > 0
+        // but no content means the model spent its whole budget "thinking"
+        // before ever emitting an answer (reasoning: max_tokens: 0 not being
+        // honored, or a model where reasoning isn't skippable); a non-null
+        // finishReason with sawAnyEvent but no content of either kind is a
+        // different failure again (e.g. immediate content_filter stop).
         lastError = lastError || new Error(`Provider ${i} returned no content`);
         recordAttempt("no_content", {
           error: lastError.message,
+          sawAnyEvent,
           finishReason,
-          rawTail: buffer.slice(0, 300),
+          reasoningCharsSeen,
+          lastRawPayload,
+          model: actualModel || provider.models[0],
         });
         continue;
       }
