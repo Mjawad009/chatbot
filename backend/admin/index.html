@@ -662,14 +662,23 @@ async function loadOverview() {
     document.getElementById("tenantCount").textContent = `${data.tenantCount} loaded · rate limit ${data.rateLimitPerMinute}/min`;
     const unprotected = data.tenants.filter((t) => t.unprotectedOrigin);
     const banner = document.getElementById("originWarningBanner");
-    banner.innerHTML = unprotected.length
+    const loadErrorBanner = (data.loadErrors && data.loadErrors.length)
+      ? `<div class="panel" style="border-color: var(--danger); margin-bottom: 16px;">
+           <div class="panel-body" style="color: var(--danger); font-weight: 600;">
+             ⚠ ${data.loadErrors.length} tenant${data.loadErrors.length > 1 ? "s" : ""} saved but failed to load —
+             ${data.loadErrors.length > 1 ? "they are" : "it is"} NOT in the list below and NOT serving chat:<br>
+             ${data.loadErrors.map((e) => `<span class="mono">${esc(e.tenantId)}</span>: ${esc(e.error)}`).join("<br>")}
+           </div>
+         </div>`
+      : "";
+    banner.innerHTML = loadErrorBanner + (unprotected.length
       ? `<div class="panel" style="border-color: var(--danger); margin-bottom: 16px;">
            <div class="panel-body" style="color: var(--danger); font-weight: 600;">
              ⚠ ${unprotected.length} tenant${unprotected.length > 1 ? "s have" : " has"} no allowedOrigins set —
              ${unprotected.map((t) => esc(t.id)).join(", ")}. Their /api/chat is callable from any website. Set allowedOrigins before going live.
            </div>
          </div>`
-      : "";
+      : "");
     if (!data.tenants.length) { el.innerHTML = '<div class="empty">No tenants loaded.</div>'; return; }
     el.innerHTML = `<table>
       <thead><tr><th>Tenant</th><th>Survey</th><th>Providers</th><th>Primary models</th><th>Chips</th><th>Origins</th><th>Channels</th></tr></thead>
