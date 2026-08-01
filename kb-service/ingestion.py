@@ -53,6 +53,7 @@ from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, HnswConfigDiff, KeywordIndexParams, PayloadSchemaType
+from rank_bm25 import BM25Okapi
 
 import config
 from query_numbers import generate_query_variants
@@ -576,6 +577,30 @@ def list_files(tenant_id: str) -> list:
     return sorted(out, key=lambda f: f["ingestedAt"] or "", reverse=True)
 
 
+_RRF_K = 60  # standard constant from the original RRF paper; not worth tuning per-tenant
+
+
+def _stem(word: str) -> str:
+    # Deliberately crude, not a real stemmer (no new dependency for this) —
+    # exists only to stop the most common case from silently defeating
+    # lexical matching: a query asking about "fee" not matching a chunk
+    # that only ever says "fees", or "requirement" vs "requirements". Not
+    # linguistically correct (this will over-strip some words), but for
+    # BM25's bag-of-words purposes, a few false collisions are a far
+    # smaller cost than exact-match failing on ordinary plurals.
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 4 and word.endswith("es"):
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _tokenize(text: str) -> list:
+    return [_stem(w) for w in re.findall(r"[a-z0-9]+", text.lower())]
+
+
 def search(tenant_id: str, query: str, top_k: int = 5, country: str = None, category: str = None, qdrant_url: str = None, qdrant_api_key: str = None, collection_name: str = None) -> list:
     vector_store = get_vector_store(qdrant_url, qdrant_api_key, collection_name)
     index = VectorStoreIndex.from_vector_store(vector_store, embed_model=get_embed_model())
@@ -584,7 +609,14 @@ def search(tenant_id: str, query: str, top_k: int = 5, country: str = None, cate
     # country/category, when given, narrow further (a general/untagged doc
     # won't match either filter, by design: pass None from the caller if you
     # want the full tenant-wide result set instead).
-    retriever = index.as_retriever(similarity_top_k=top_k, filters=_tenant_filter(tenant_id, country, category))
+    #
+    # Retrieve a wider candidate pool than top_k — BM25 below reranks WITHIN
+    # this pool, it can't rescue a genuinely relevant chunk vector search
+    # didn't surface at all. 4x top_k (capped at 30, floor of 20) is enough
+    # headroom for lexical reranking to actually change the final order
+    # without fetching the tenant's whole corpus on every chat turn.
+    candidate_k = min(max(top_k * 4, 20), 30)
+    retriever = index.as_retriever(similarity_top_k=candidate_k, filters=_tenant_filter(tenant_id, country, category))
 
     # Number-form side job (see query_numbers.py): survey/poll chunks mix
     # "20%" and "twenty percent" and embeddings don't reliably bridge the
@@ -600,15 +632,57 @@ def search(tenant_id: str, query: str, top_k: int = 5, country: str = None, cate
             if existing is None or (r.score or 0) > (existing.score or 0):
                 best_by_node[node_id] = r
 
-    merged = sorted(best_by_node.values(), key=lambda r: r.score or 0, reverse=True)[:top_k]
+    if not best_by_node:
+        return []
+
+    # --- Hybrid rerank: fuse vector rank with BM25 (lexical) rank -----
+    # Vector similarity alone routinely misses exact matches on program
+    # names, specific figures, or country names — the embedding puts them
+    # "near" the right neighborhood but a lexically-exact chunk can still
+    # rank below a merely-topically-similar one. BM25 fixes that for exact
+    # terms; RRF is used to combine the two rankings (rather than trying to
+    # average two differently-scaled scores, vector cosine similarity and
+    # BM25 term-frequency scores aren't on comparable scales at all) —
+    # it only cares about each node's RANK in each list, not its raw score.
+    candidate_ids = list(best_by_node.keys())
+    vector_ranked_ids = sorted(candidate_ids, key=lambda nid: best_by_node[nid].score or 0, reverse=True)
+
+    corpus_tokens = [_tokenize(best_by_node[nid].node.get_content()) for nid in candidate_ids]
+    bm25 = BM25Okapi(corpus_tokens)
+    bm25_best_score = {nid: 0.0 for nid in candidate_ids}
+    for variant in variants:
+        variant_scores = bm25.get_scores(_tokenize(variant))
+        for nid, score in zip(candidate_ids, variant_scores):
+            if score > bm25_best_score[nid]:
+                bm25_best_score[nid] = score
+    bm25_ranked_ids = sorted(candidate_ids, key=lambda nid: bm25_best_score[nid], reverse=True)
+
+    fused_scores = {}
+    for rank, nid in enumerate(vector_ranked_ids):
+        fused_scores[nid] = fused_scores.get(nid, 0.0) + 1.0 / (_RRF_K + rank + 1)
+    for rank, nid in enumerate(bm25_ranked_ids):
+        fused_scores[nid] = fused_scores.get(nid, 0.0) + 1.0 / (_RRF_K + rank + 1)
+
+    # RRF ties exactly when two nodes simply swap rank position between the
+    # two lists (rank0+rank1 and rank1+rank0 sum to the same score) — a
+    # real, expected property of RRF, not a bug. Break those ties toward
+    # whichever node has the stronger raw BM25 signal: an exact lexical
+    # match is a more specific, more confident signal than a marginal
+    # difference in vector similarity, which is exactly the case this
+    # rerank exists to catch.
+    final_ids = sorted(
+        fused_scores.keys(),
+        key=lambda nid: (fused_scores[nid], bm25_best_score[nid]),
+        reverse=True,
+    )[:top_k]
     return [
         {
-            "text": r.node.get_content(),
-            "score": round(r.score, 4) if r.score is not None else None,
-            "sourceFile": r.node.metadata.get("sourceFile"),
-            "section": r.node.metadata.get("section"),
-            "country": r.node.metadata.get("country"),
-            "category": r.node.metadata.get("category"),
+            "text": best_by_node[nid].node.get_content(),
+            "score": round(fused_scores[nid], 5),
+            "sourceFile": best_by_node[nid].node.metadata.get("sourceFile"),
+            "section": best_by_node[nid].node.metadata.get("section"),
+            "country": best_by_node[nid].node.metadata.get("country"),
+            "category": best_by_node[nid].node.metadata.get("category"),
         }
-        for r in merged
+        for nid in final_ids
     ]
