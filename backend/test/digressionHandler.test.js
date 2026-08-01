@@ -37,6 +37,23 @@ test("looksLikePlausibleAnswer: generic fields (name, notes, etc.) pass with no 
   assert.equal(looksLikePlausibleAnswer("Tuesday afternoon works best", { key: "preferredTime" }), true);
 });
 
+test("looksLikePlausibleAnswer: statement-form digressions with no '?' are NOT treated as answers", () => {
+  // This is the exact bug this regression test guards against: a reply
+  // that redirects the conversation without ever using a question mark
+  // was previously accepted as the field's literal answer, silently
+  // corrupting it and skipping straight to the next question.
+  assert.equal(looksLikePlausibleAnswer("actually can I ask about pricing first", { key: "name" }), false);
+  assert.equal(looksLikePlausibleAnswer("wait I want to know about refunds", { key: "name" }), false);
+  assert.equal(looksLikePlausibleAnswer("by the way do you offer discounts", { key: "notes" }), false);
+  assert.equal(looksLikePlausibleAnswer("before that, what documents do I need", { key: "preferredTime" }), false);
+});
+
+test("looksLikePlausibleAnswer: an unusually long generic-field reply is treated as uncertain, not auto-accepted", () => {
+  const ramble =
+    "so I was thinking about this for a while and I am not totally sure yet but maybe next week could work depending on stuff";
+  assert.equal(looksLikePlausibleAnswer(ramble, { key: "preferredTime" }), false);
+});
+
 test("looksLikePlausibleAnswer: empty/whitespace-only input is never plausible", () => {
   assert.equal(looksLikePlausibleAnswer("", { key: "name" }), false);
   assert.equal(looksLikePlausibleAnswer("   ", { key: "name" }), false);
