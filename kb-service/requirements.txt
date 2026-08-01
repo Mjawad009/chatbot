@@ -15,3 +15,12 @@ qdrant-client==1.11.3
 
 # Lightweight local embeddings (ONNX runtime, no PyTorch)
 fastembed==0.3.6
+
+# Lexical (keyword) retrieval for hybrid search — pure Python, no model
+# download, no PyTorch. Deliberately NOT a cross-encoder reranker: this
+# service already runs on a tight per-request latency budget (the Node
+# backend gives it one ~6s fast-fail attempt with no retries), so adding a
+# model that needs to load into memory would trade retrieval quality for
+# more timeouts. rank_bm25 scores the small candidate pool vector search
+# already retrieved — no extra network round-trip, negligible CPU cost.
+rank_bm25==0.2.2
