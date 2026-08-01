@@ -30,6 +30,17 @@ function detectCancelIntent(message) {
 
 const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 
+// Common ways people redirect mid-flow WITHOUT ever using a "?" —
+// "actually, can I ask about pricing first" reads exactly like a real
+// answer to a shape-only check (non-empty, no "?"), which is how this bug
+// showed up in practice: a genuine digression got silently stored as the
+// field's value and the flow moved straight to the next question. This
+// isn't trying to be exhaustive — it's a cheap net for the common phrasings
+// people actually use to interrupt a flow, backstopped by the LLM
+// classifier below for anything it misses.
+const DIGRESSION_SIGNAL_RE =
+  /\b(actually|wait|hold on|before (that|i|we)|by the way|btw|one (sec|second|moment)|quick question|can i ask|also,? (i|can|do|is|does|what)|what about|tell me about|instead|never ?mind that|forget that)\b/i;
+
 // Pure shape check — no LLM. True = "confidently looks like a real
 // answer, skip the LLM classifier entirely." False = "uncertain, worth a
 // classifier call before assuming this is the field's value."
@@ -40,16 +51,22 @@ function looksLikePlausibleAnswer(message, field) {
   // regardless of field type — genuine answers essentially never end in
   // "?", but "wait, why do you need that?" always will.
   if (text.includes("?")) return false;
+  if (DIGRESSION_SIGNAL_RE.test(text)) return false;
 
   const key = (field?.key || "").toLowerCase();
   if (key.includes("email")) return EMAIL_RE.test(text);
   if (key.includes("phone")) return (text.replace(/[^\d]/g, "").length >= 7);
   // Generic fields (name, notes, preferredTime, custom fields, etc.) — no
-  // "?" and it's present is good enough for the fast path. Being lenient
-  // here is deliberate: false negatives here just cost one extra cheap
-  // LLM classification call, but false positives would mean genuine
-  // answers routinely getting second-guessed, which is worse UX.
-  return true;
+  // "?", no digression phrase, and short enough to plausibly BE a name/
+  // time/short note rather than a redirect or a ramble. A real answer to
+  // "what's your name?" or "what time works?" is essentially never more
+  // than a handful of words; anything longer is worth the one cheap
+  // classifier call rather than risking silent corruption. Being lenient
+  // under that length is still deliberate: false negatives just cost one
+  // extra classification call, false positives mean genuine short answers
+  // routinely getting second-guessed, which is worse UX.
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  return wordCount <= 12;
 }
 
 // LLM fallback — only reached when looksLikePlausibleAnswer() returned
