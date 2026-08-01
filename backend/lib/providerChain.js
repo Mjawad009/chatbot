@@ -24,6 +24,34 @@
  * MAX_CONCURRENT_PER_PROVIDER_KEY with that in mind if you scale out).
  */
 
+function maskKey(key) {
+  if (!key) return "(empty)";
+  const hasLeadingOrTrailingWhitespace = key !== key.trim();
+  const len = key.length;
+  const preview = len > 10 ? `${key.slice(0, 6)}...${key.slice(-4)}` : "(too short to preview safely)";
+  return `${preview} [len=${len}${hasLeadingOrTrailingWhitespace ? ", ⚠️ HAS LEADING/TRAILING WHITESPACE" : ""}]`;
+}
+
+// One-time, boot-time fingerprint of whatever key(s) are actually loaded —
+// printed once so a mismatch between "what I pasted into Railway" and "what
+// Node actually read from process.env" is visible without ever printing
+// the real secret. A key with trailing whitespace/newline (common when
+// pasting into a dashboard textarea) still passes `if (!apiKey)` checks but
+// produces a mangled Authorization header that some upstreams reject
+// silently rather than with a clean 401 — which looks exactly like the
+// empty-200 behavior we're chasing.
+console.log(`🔑 OPENROUTER_API_KEY (global) fingerprint: ${maskKey(process.env.OPENROUTER_API_KEY)}`);
+console.log(`   Node version: ${process.version}`);
+(async () => {
+  try {
+    const ipRes = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(5000) });
+    const ipJson = await ipRes.json();
+    console.log(`   Outbound egress IP: ${ipJson.ip}`);
+  } catch (e) {
+    console.log(`   Outbound egress IP: could not determine (${e.message})`);
+  }
+})();
+
 function resolveProviderEntry(raw, globalDefaults) {
   const apiUrl = raw.apiUrl || globalDefaults.apiUrl;
   const apiKey = raw.apiKeyEnv ? process.env[raw.apiKeyEnv] : globalDefaults.apiKey;
@@ -132,7 +160,15 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${provider.apiKey}`,
-          "HTTP-Referer": "http://localhost",
+          // Was hardcoded to "http://localhost" even in production. OpenRouter
+          // uses this (and X-Title) to attribute/bucket requests per-app for
+          // analytics and, on free-tier models, as part of its abuse/rate
+          // heuristics. Every deployment of this codebase — anyone's local
+          // dev box included — was presenting itself as the exact same
+          // "http://localhost" app identity, which is about as generic and
+          // easy to rate-limit-as-a-group as a referer can get. Point it at
+          // the real deployment so this app is identified as itself.
+          "HTTP-Referer": process.env.PUBLIC_APP_URL || "http://localhost",
           "X-Title": "Insight Bot Survey Chatbot",
         },
         body: JSON.stringify({
@@ -154,6 +190,15 @@ async function streamFromProviderChain(providerChain, payloadMessagesBuilder, re
           // names — OpenRouter ignores this param on models that don't
           // support it, so it's harmless to send everywhere.
           reasoning: { max_tokens: 0 },
+          // No temperature was being sent at all, which means every model
+          // was using ITS OWN default — commonly 1.0, tuned for creative/
+          // conversational variety, not for consistently repeating the
+          // same facts from the DATA block on every ask. For a grounded
+          // Q&A bot, lower and more consistent beats more "creative": the
+          // right answer to "what's the minimum GPA?" shouldn't vary
+          // between askings. 0.3 keeps some natural phrasing variety
+          // without drifting into paraphrased-into-wrong-territory numbers.
+          temperature: 0.3,
         }),
       });
 
