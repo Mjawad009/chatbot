@@ -608,6 +608,82 @@ app.get("/api/admin/status", adminAuth, async (req, res) => {
   res.json({ status, tenantCount: tenants.size });
 });
 
+// Minimal, isolated OpenRouter connectivity test — deliberately bypasses
+// tenants, KB, provider chains, and SSE parsing entirely. Exists purely to
+// answer one question when `no_content` shows up for every model tried:
+// is streaming itself the thing breaking on this network path? A
+// non-streaming (stream:false) request gets the full completion back in
+// one plain JSON response with no chunked transfer involved — if THAT
+// works while streaming doesn't, the problem is Railway's handling of
+// long-lived streamed responses, not OpenRouter, the account, or the model.
+app.get("/api/admin/debug/openrouter-test", adminAuth, async (req, res) => {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const apiUrl = process.env.OPENROUTER_API_URL || "https://openrouter.ai/api/v1/chat/completions";
+  const model = req.query.model || "google/gemini-2.5-flash-lite";
+  if (!apiKey) return res.status(400).json({ ok: false, error: "OPENROUTER_API_KEY not set in this environment" });
+
+  const baseBody = {
+    model,
+    max_tokens: 50,
+    messages: [{ role: "user", content: "Reply with exactly: OK" }],
+  };
+  const baseHeaders = {
+    "content-type": "application/json",
+    authorization: `Bearer ${apiKey}`,
+    "HTTP-Referer": process.env.PUBLIC_APP_URL || "http://localhost",
+    "X-Title": "Insight Bot Debug Test",
+  };
+
+  const result = { model, apiUrl, nonStreaming: null, streaming: null };
+
+  // --- Non-streaming test ---
+  try {
+    const start = Date.now();
+    const r = await fetch(apiUrl, {
+      method: "POST",
+      headers: baseHeaders,
+      body: JSON.stringify({ ...baseBody, stream: false }),
+      signal: AbortSignal.timeout(20000),
+    });
+    const text = await r.text();
+    result.nonStreaming = { status: r.status, durationMs: Date.now() - start, bodyLength: text.length, bodyPreview: text.slice(0, 400) };
+  } catch (e) {
+    result.nonStreaming = { error: e.message };
+  }
+
+  // --- Streaming test ---
+  try {
+    const start = Date.now();
+    const r = await fetch(apiUrl, {
+      method: "POST",
+      headers: baseHeaders,
+      body: JSON.stringify({ ...baseBody, stream: true }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok || !r.body) {
+      const text = await r.text().catch(() => "");
+      result.streaming = { status: r.status, durationMs: Date.now() - start, bodyPreview: text.slice(0, 400) };
+    } else {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let raw = "";
+      let chunkCount = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunkCount++;
+        raw += decoder.decode(value, { stream: true });
+        if (raw.length > 2000) break; // enough to diagnose, don't buffer forever
+      }
+      result.streaming = { status: r.status, durationMs: Date.now() - start, chunkCount, rawLength: raw.length, rawPreview: raw.slice(0, 800) };
+    }
+  } catch (e) {
+    result.streaming = { error: e.message };
+  }
+
+  res.json({ ok: true, result });
+});
+
 app.get("/api/admin/overview", adminAuth, (req, res) => {
   const tenantList = [...tenants.entries()].map(([id, t]) => ({
     id,
