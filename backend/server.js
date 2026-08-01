@@ -159,6 +159,14 @@ const FRIENDLY_ERROR_MESSAGES = {
 // ---------------------------------------------------------------------------
 const TENANTS_DIR = path.join(__dirname, "data", "tenants");
 let tenants = new Map(); // reassigned wholesale on reload — see reloadTenants() below
+// Populated fresh on every buildTenantsMap() run — tenants that exist in
+// storage but threw while being constructed (bad field, malformed value,
+// etc.) used to just vanish with nothing but a server-log line to show for
+// it: the save would report success, the reload would "succeed", and the
+// broken tenant would simply never appear anywhere in the admin panel.
+// Surfaced via /api/admin/overview and the save response so that failure
+// is visible where an admin can actually see it.
+let lastTenantLoadErrors = [];
 
 // System-prompt construction and the engagement-signal detector now live in
 // lib/systemPrompts.js (extracted out of this file's original monolith —
@@ -178,7 +186,25 @@ async function buildTenantsMap() {
     internalModel: process.env.OPENROUTER_INTERNAL_MODEL || "meta-llama/llama-3.3-70b-instruct:free",
   };
 
+  // A bare https://openrouter.ai/api/v1 (missing /chat/completions) still
+  // resolves and returns 200 OK — it's OpenRouter's own marketing site,
+  // not an API error — so every chat request silently "succeeds" against
+  // the wrong endpoint and gets HTML back instead of a completion. Nothing
+  // downstream distinguishes that from a real empty-response provider
+  // failure, so it manifests as an unexplained "no content" on every model,
+  // every time, with no clue in the error message. Catch the specific
+  // mistake at boot instead.
+  if (process.env.OPENROUTER_API_URL && !/\/chat\/completions\/?$/.test(process.env.OPENROUTER_API_URL)) {
+    console.warn(
+      `⚠️  OPENROUTER_API_URL is set to "${process.env.OPENROUTER_API_URL}", which doesn't end in /chat/completions. ` +
+        `This env var is almost never needed — remove it entirely to use the correct built-in default, or fix it to ` +
+        `end with /chat/completions. Left as-is, requests will return 200 OK with OpenRouter's website HTML instead ` +
+        `of a real completion, which looks identical to "provider returned no content" in the logs.`
+    );
+  }
+
   const next = new Map();
+  const buildErrors = [];
 
   // DB-first, file-fallback — see lib/tenantStore.js. Unset DATABASE_URL
   // keeps this on the original file-based path with zero behavior change;
@@ -306,8 +332,11 @@ async function buildTenantsMap() {
       console.log(`✅ Loaded tenant "${tenantId}": "${surveyPayload.survey_meta?.title || "(untitled)"}" — ${providerChain.length} provider(s), primary models: [${providerChain[0].models.join(", ")}]`);
     } catch (err) {
       console.error(`❌ Failed to load tenant "${tenantId}":`, err.message);
+      buildErrors.push({ tenantId, error: err.message });
     }
   }
+
+  lastTenantLoadErrors = buildErrors;
 
   if (!next.has(DEFAULT_TENANT)) {
     throw new Error(`No tenant named "${DEFAULT_TENANT}" found (checked ${tenantStore.isConfigured() ? "the database" : "data/tenants/*.json"}) — at least one tenant with this id is required as the fallback for requests that omit tenantId.`);
@@ -320,6 +349,15 @@ async function buildTenantsMap() {
 // — you want this in Railway's boot logs, not a half-started server.
 (async () => {
   try {
+    if (process.env.KB_SERVICE_URL && !process.env.KB_SERVICE_API_KEY) {
+      console.warn(
+        "⚠️  KB_SERVICE_URL is set but KB_SERVICE_API_KEY is not. The KB service's own auth check " +
+          "(require_api_key in kb-service/app.py) skips validation entirely when no key is configured, " +
+          "so every /search, /ingest, /tenants/*/files, and delete endpoint on it is open to anyone who " +
+          "can reach that URL — across every tenant, not just one. Set KB_SERVICE_API_KEY on BOTH the KB " +
+          "service and this backend before that URL is reachable from anywhere but Railway's private network."
+      );
+    }
     tenants = await buildTenantsMap();
     startServer();
   } catch (err) {
@@ -336,7 +374,7 @@ async function buildTenantsMap() {
 async function reloadTenants() {
   const next = await buildTenantsMap(); // throws on fatal — caller decides how to report it
   tenants = next;
-  return { tenantIds: [...tenants.keys()] };
+  return { tenantIds: [...tenants.keys()], loadErrors: lastTenantLoadErrors };
 }
 
 function getTenant(tenantId) {
@@ -704,6 +742,7 @@ app.get("/api/admin/overview", adminAuth, (req, res) => {
   }));
   res.json({
     tenantCount: tenants.size,
+    loadErrors: lastTenantLoadErrors,
     tenants: tenantList,
     rateLimitPerMinute: RATE_LIMIT_MAX,
   });
@@ -966,6 +1005,21 @@ app.put("/api/admin/tenant/:id", adminAuth, async (req, res) => {
 
   try {
     const result = await reloadTenants();
+    const ownFailure = result.loadErrors.find((e) => e.tenantId === tenantId);
+    if (ownFailure) {
+      // Saved to storage fine, but THIS tenant specifically threw while
+      // being built into a live config — it's in the DB/file but absent
+      // from the running tenant map, the admin list, and /api/chat. This
+      // is the exact failure mode that used to look like nothing happened
+      // at all: report it as an error even though the write itself succeeded.
+      console.log(`💾 Tenant "${tenantId}" ${isNew ? "created" : "updated"} in storage, but failed to load: ${ownFailure.error}`);
+      return res.status(400).json({
+        ok: false,
+        created: isNew,
+        error: `Saved, but this tenant failed to load and will NOT appear in the list or serve chat: ${ownFailure.error}`,
+        tenantIds: result.tenantIds,
+      });
+    }
     console.log(`💾 Tenant "${tenantId}" ${isNew ? "created" : "updated"} via admin panel and reloaded.`);
     res.json({ ok: true, created: isNew, ...result });
   } catch (err) {
@@ -1311,11 +1365,22 @@ app.post("/api/chat", async (req, res) => {
   const kbMessages = [];
   let kbSearchMs = 0;
   if (kbClient.isConfigured()) {
+    // A bare vector search on the current message alone works fine for a
+    // self-contained question ("what's the minimum GPA for a Master's?")
+    // but falls apart on the kind of short follow-up real conversations are
+    // full of — "what about for Canada?", "and the fees?" — which carry
+    // almost no retrievable content on their own; the topic/entities live
+    // in the PREVIOUS turn, not this one. Folding the prior user turn into
+    // the search query costs nothing extra (no LLM call, no round-trip,
+    // still one KB request) and gives the embedding something to actually
+    // match against for exactly this pattern.
+    const priorUserTurn = [...trimmedHistory].reverse().find((m) => m.role === "user" && m.content !== lastUserMessage);
+    const kbSearchQuery = priorUserTurn ? `${priorUserTurn.content} ${lastUserMessage}` : lastUserMessage;
     // fast: true — a slow/unreachable KB Service gets one ~6s attempt, no
     // retries, then chat proceeds without KB context rather than stalling
     // the user's response for the full default retry budget.
     const kbStartedAt = Date.now();
-    const kbResult = await kbClient.search(tenantId, lastUserMessage, tenant.useKbOnly ? 8 : 5, { fast: true, vectorDb: tenant.dataResidency });
+    const kbResult = await kbClient.search(tenantId, kbSearchQuery, tenant.useKbOnly ? 8 : 5, { fast: true, vectorDb: tenant.dataResidency });
     kbSearchMs = Date.now() - kbStartedAt;
     if (kbResult.ok && Array.isArray(kbResult.data?.results) && kbResult.data.results.length > 0) {
       const context = kbResult.data.results
