@@ -59,6 +59,12 @@ ${personaLine}
 {"followups": ["question 1", "question 2"]}
 \`\`\`
 
+## FORMATTING BASELINE (applies unless the instructions above say otherwise for this tenant)
+- The widget renders full Markdown — use it. Any numerical comparison (two or more numbers, percentages, or scores side by side) should be a Markdown table, not prose. Multi-item lists (steps, options, requirements) should be bullets, one short point each, not one dense paragraph.
+- Prefer a complete, well-structured answer (tables, bullets, bold labels for sections) over a short unstructured one whenever there's more than one relevant point to make — but keep genuinely narrow questions ("what's the exact number for X") short and direct.
+- Never end a response with a meta question like "Let me know if you'd like to..." — answer and stop; the follow-up buttons above already handle that.
+- If a source/reference URL relevant to the answer is present in the DATA below, cite it as a Markdown link. Never invent a URL that isn't literally in the data.
+
 ${dataSection("DATA", payload, useKbOnly)}
 
 Answer strictly from the JSON above.`;
