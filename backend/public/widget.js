@@ -158,6 +158,18 @@
     ".ib-send-btn:active { transform: scale(.92); }\n" +
     ".ib-send-btn.ib-stop-mode { background: linear-gradient(135deg, #ef4444, #dc2626); box-shadow: 0 4px 14px rgba(220,38,38,.25); }\n" +
     ".ib-send-btn:disabled { background: #b7b64a; box-shadow: none; transform: none; cursor: not-allowed; }\n" +
+    ".ib-form-card { background: var(--ib-bg); border: 1px solid var(--ib-border); border-radius: 12px; padding: 14px; margin: 8px 0; }\n" +
+    ".ib-form-title { font-size: 13px; font-weight: 600; color: var(--ib-text); margin: 0 0 10px; display: flex; align-items: center; gap: 6px; }\n" +
+    ".ib-form-field { margin-bottom: 10px; }\n" +
+    ".ib-form-label { display: block; font-size: 12px; color: var(--ib-text-soft); margin-bottom: 4px; }\n" +
+    ".ib-form-required { color: var(--ib-accent-dark); }\n" +
+    ".ib-form-input { width: 100%; box-sizing: border-box; border: 1.5px solid var(--ib-border); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit; outline: none; background: #fff; color: var(--ib-text); transition: border-color .15s ease; }\n" +
+    ".ib-form-input:focus { border-color: var(--ib-accent); box-shadow: 0 0 0 3px rgba(128,154,57,.15); }\n" +
+    ".ib-form-input.ib-form-input-error { border-color: #dc2626; }\n" +
+    ".ib-form-submit-btn { width: 100%; margin-top: 4px; background: linear-gradient(135deg, var(--ib-accent), var(--ib-accent-dark)); color: #fff; border: none; border-radius: 8px; padding: 9px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer; transition: opacity .15s ease; }\n" +
+    ".ib-form-submit-btn:disabled { opacity: .6; cursor: not-allowed; }\n" +
+    ".ib-form-error-text { color: #dc2626; font-size: 12px; margin-top: 8px; }\n" +
+    ".ib-form-submitted { text-align: center; padding: 8px 0; color: var(--ib-text-soft); font-size: 13px; }\n" +
     ".ib-footnote { font-size: 10px; color: #4c7a24; text-align: center; margin-top: 4px; }\n" +
     ".ib-history-page { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #d8ddac; z-index: 15; display: none; flex-direction: column; animation: ib-slide-up .2s cubic-bezier(.22,1,.36,1); }\n" +
     ".ib-history-page.ib-show { display: flex; }\n" +
@@ -769,6 +781,125 @@
       btn.innerHTML = ICON_CHECK;
       setTimeout(function () { btn.innerHTML = original; }, 1200);
     }
+    // -------------------------------------------------------------------
+    // Automation form — triggered by a renderForm block from /api/chat
+    // (see splitIntoSegments above). Deliberately blank, not pre-filled
+    // from conversation context: a value the user typed themselves is
+    // unambiguous, one silently pulled from earlier in the chat requires
+    // them to notice, read, and correct it if wrong. Submits as one plain
+    // request to /api/automation-submit — there's no chat-message-based
+    // back-and-forth for this at all, so nothing here can be misread as a
+    // digression or a cancel the way the old per-field flow could.
+    // -------------------------------------------------------------------
+    function renderAutomationForm(config) {
+      var card = document.createElement("div");
+      card.className = "ib-form-card";
+
+      var title = document.createElement("p");
+      title.className = "ib-form-title";
+      title.textContent = config.name || "Fill in your details";
+      card.appendChild(title);
+
+      var inputs = {};
+      (config.fields || []).forEach(function (field) {
+        var wrap = document.createElement("div");
+        wrap.className = "ib-form-field";
+
+        var label = document.createElement("label");
+        label.className = "ib-form-label";
+        label.textContent = field.label || field.key;
+        if (field.required) {
+          var star = document.createElement("span");
+          star.className = "ib-form-required";
+          star.textContent = " *";
+          label.appendChild(star);
+        }
+        wrap.appendChild(label);
+
+        var input = document.createElement("input");
+        input.type = "text";
+        input.className = "ib-form-input";
+        input.setAttribute("data-field-key", field.key);
+        wrap.appendChild(input);
+        inputs[field.key] = input;
+
+        card.appendChild(wrap);
+      });
+
+      var errorText = document.createElement("div");
+      errorText.className = "ib-form-error-text";
+      errorText.style.display = "none";
+
+      var submitBtn = document.createElement("button");
+      submitBtn.type = "button";
+      submitBtn.className = "ib-form-submit-btn";
+      submitBtn.textContent = "Send";
+
+      submitBtn.addEventListener("click", function () {
+        // Client-side required-field check first — instant feedback,
+        // no network round trip needed just to say "this is empty".
+        // The real, authoritative validation still happens server-side
+        // in /api/automation-submit before anything executes.
+        var missing = (config.fields || []).filter(function (f) {
+          return f.required && !inputs[f.key].value.trim();
+        });
+        (config.fields || []).forEach(function (f) {
+          inputs[f.key].classList.toggle("ib-form-input-error", missing.indexOf(f) !== -1);
+        });
+        if (missing.length > 0) {
+          errorText.textContent = "Please fill in: " + missing.map(function (f) { return f.label || f.key; }).join(", ");
+          errorText.style.display = "block";
+          return;
+        }
+
+        var fields = {};
+        Object.keys(inputs).forEach(function (key) { fields[key] = inputs[key].value.trim(); });
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Sending…";
+        errorText.style.display = "none";
+
+        var headers = { "Content-Type": "application/json" };
+        if (TENANT_KEY) headers["X-Widget-Key"] = TENANT_KEY;
+
+        fetch(API_BASE + "/api/automation-submit", {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify({
+            sessionId: TENANT_ID + "_" + activeChatId,
+            tenantId: TENANT_ID,
+            automationId: config.automationId,
+            fields: fields,
+          }),
+        })
+          .then(function (res) { return res.json().then(function (data) { return { status: res.status, data: data }; }); })
+          .then(function (result) {
+            if (!result.data.ok) {
+              submitBtn.disabled = false;
+              submitBtn.textContent = "Send";
+              errorText.textContent = result.data.error || "Something went wrong — please try again.";
+              errorText.style.display = "block";
+              return;
+            }
+            var done = document.createElement("div");
+            done.className = "ib-form-submitted";
+            done.textContent = result.data.message || "Done.";
+            card.innerHTML = "";
+            card.appendChild(done);
+          })
+          .catch(function () {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Send";
+            errorText.textContent = "Couldn't reach the server — check your connection and try again.";
+            errorText.style.display = "block";
+          });
+      });
+
+      card.appendChild(submitBtn);
+      card.appendChild(errorText);
+      return card;
+    }
+
     function renderChartCanvas(config) {
       var wrap = document.createElement("div");
       wrap.className = "ib-chart-wrap";
@@ -849,6 +980,8 @@
 
         if (parsed && parsed.renderChart === true) {
           segments.push({ type: "chart", config: parsed });
+        } else if (parsed && parsed.renderForm && typeof parsed.renderForm === "object") {
+          segments.push({ type: "form", config: parsed.renderForm });
         } else if (parsed && Array.isArray(parsed.followups)) {
           followups = parsed.followups.filter(function (q) { return typeof q === "string" && q.trim(); });
           // intentionally NOT pushed to segments — never rendered as visible text
@@ -878,6 +1011,8 @@
             fallback.textContent = "⚠️ Couldn't render chart. Try refreshing the page.";
             container.appendChild(fallback);
           }
+        } else if (seg.type === "form") {
+          container.appendChild(renderAutomationForm(seg.config));
         } else if (seg.content.trim().length > 0) {
           var div = document.createElement("div");
           div.className = "ib-msg-content";
