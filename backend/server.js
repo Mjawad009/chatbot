@@ -31,7 +31,7 @@ require("dotenv").config();
 const { classifyIntent } = require("./lib/intent");
 const { getAutomations, matchAutomation, getAutomationById } = require("./lib/automations");
 const { executeAutomation } = require("./lib/automationExecutor");
-const { validateArguments } = require("./lib/aiBooking"); // field validation only — the tool-calling conversation flow it also contains is no longer wired up (see automation router below)
+// const { validateArguments } = require("./lib/aiBooking"); // field validation only — the tool-calling conversation flow it also contains is no longer wired up (see automation router below)
 const { estimateCostUsd, getPricingMeta } = require("./lib/modelPricing");
 const { dispatchLead } = require("./lib/notifiers");
 const { kvGet, kvSet, kvDelete, kvAppendAndCountRecent, kvCountRecent, isRedisActive } = require("./lib/kv");
