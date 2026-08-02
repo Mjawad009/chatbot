@@ -40,7 +40,7 @@ const tenantStore = require("./lib/tenantStore");
 const activityStore = require("./lib/activityStore");
 const { resolveProviderEntry, streamFromProviderChain, providerSemaphore } = require("./lib/providerChain");
 const { sanitizeMessages } = require("./lib/sanitizeMessages");
-const whatsappChannel = require("./lib/whatsappChannel");
+// const whatsappChannel = require("./lib/whatsappChannel");
 
 const app = express();
 app.set("trust proxy", 1); // Railway (and most PaaS) sit behind a proxy — without this, req.ip is
