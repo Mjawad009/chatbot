@@ -28,13 +28,10 @@ const crypto = require("crypto");
 const multer = require("multer");
 require("dotenv").config();
 
-const { classifyIntent, isAffirmative } = require("./lib/intent");
+const { classifyIntent } = require("./lib/intent");
 const { getAutomations, matchAutomation, getAutomationById } = require("./lib/automations");
-const automationState = require("./lib/automationState");
-const { extractKnownFields, structureFieldAnswers, mergeStructured, cleanFieldAnswer } = require("./lib/automationFields");
-const { detectCancelIntent, looksLikePlausibleAnswer, classifyFieldReply, answerDigression } = require("./lib/digressionHandler");
-const { fieldQuestionText, looksLikeTimeField, confirmationSummary, executeAutomation } = require("./lib/automationExecutor");
-const { generateAvailableSlots } = require("./lib/availability");
+const { executeAutomation } = require("./lib/automationExecutor");
+const { validateArguments } = require("./lib/aiBooking"); // field validation only — the tool-calling conversation flow it also contains is no longer wired up (see automation router below)
 const { estimateCostUsd, getPricingMeta } = require("./lib/modelPricing");
 const { dispatchLead } = require("./lib/notifiers");
 const { kvGet, kvSet, kvDelete, kvAppendAndCountRecent, kvCountRecent, isRedisActive } = require("./lib/kv");
@@ -43,12 +40,19 @@ const tenantStore = require("./lib/tenantStore");
 const activityStore = require("./lib/activityStore");
 const { resolveProviderEntry, streamFromProviderChain, providerSemaphore } = require("./lib/providerChain");
 const { sanitizeMessages } = require("./lib/sanitizeMessages");
+const whatsappChannel = require("./lib/whatsappChannel");
 
 const app = express();
 app.set("trust proxy", 1); // Railway (and most PaaS) sit behind a proxy — without this, req.ip is
                             // always the proxy's address and every visitor shares one rate-limit bucket.
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+// verify: captures the exact raw bytes alongside Express's normal JSON
+// parsing — needed by the WhatsApp webhook route to verify Meta's
+// X-Hub-Signature-256 HMAC, which is computed over the raw body, not the
+// re-serialized JSON (those aren't guaranteed to be byte-identical).
+// Negligible cost to attach this for every route rather than special-case
+// one; simpler than running two separate body parsers.
+app.use(express.json({ limit: "1mb", verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 const PORT = process.env.PORT || 3001;
 // The fallback tenant used when a request omits tenantId (mainly a dev/test
@@ -379,6 +383,29 @@ async function reloadTenants() {
 
 function getTenant(tenantId) {
   return tenants.get(tenantId) || null;
+}
+
+// One Meta WhatsApp App receives webhooks for every tenant's WhatsApp
+// number on this platform — Meta's payload only tells you WHICH phone
+// number received the message (phone_number_id), not which tenant that
+// belongs to, so this is the WhatsApp-channel equivalent of tenantId
+// lookup. O(tenant count) is fine — this runs once per inbound WhatsApp
+// message, not per chat turn on the widget, and tenant counts here are in
+// the tens, not thousands.
+//
+// Deliberately gated by `channelEnabled`, a DIFFERENT flag from the
+// existing `integrations.whatsapp.enabled` — that one only ever turned on
+// lib/notifiers/whatsapp.js, a one-way "you got a new lead" alert to a
+// fixed staff number. This is the two-way customer-facing channel; a
+// tenant may want one without the other; the credentials (phoneNumberId,
+// accessToken) are shared since they're properties of the same WhatsApp
+// Business number either way.
+function getTenantByWhatsAppPhoneNumberId(phoneNumberId) {
+  for (const [tenantId, tenant] of tenants) {
+    const wa = tenant.integrations?.whatsapp;
+    if (wa?.channelEnabled && wa?.phoneNumberId === phoneNumberId) return { tenantId, tenant, whatsappConfig: wa };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,6 +1135,126 @@ async function isRateLimited(ip, tenantId) {
 // now lives in lib/providerChain.js.
 
 // ---------------------------------------------------------------------------
+// WhatsApp channel — real two-way conversation, distinct from
+// lib/notifiers/whatsapp.js's one-way lead alerts. Reuses the exact same
+// system prompt / KB retrieval / provider chain the web widget uses;
+// deliberately does NOT hook into the booking/automation state machine
+// below (that's tightly coupled to the streaming response + browser
+// session cookie) — this first pass is Q&A only. A user can still be
+// pointed to the web widget or asked for contact info in plain conversation
+// for anything that needs the full booking flow.
+// ---------------------------------------------------------------------------
+
+// Meta's verification handshake: when you register this URL in the Meta
+// for Developers dashboard, it makes exactly this GET request once to
+// prove you control the endpoint before it'll ever send you real webhooks.
+app.get("/webhooks/whatsapp", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token && process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN && token === process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  res.sendStatus(403);
+});
+
+app.post("/webhooks/whatsapp", async (req, res) => {
+  // Acknowledge immediately — Meta retries aggressively (and eventually
+  // disables the webhook) if it doesn't get a fast 200, and generating a
+  // real answer (KB search + LLM call) routinely takes longer than Meta's
+  // patience for that first response. The actual reply goes out afterward
+  // as its own API call via whatsappChannel.sendMessage, not as this
+  // response body.
+  res.sendStatus(200);
+
+  try {
+    const signature = req.headers["x-hub-signature-256"];
+    if (!whatsappChannel.verifyWebhookSignature(req.rawBody, signature, process.env.WHATSAPP_APP_SECRET)) {
+      logSecurity({ context: "whatsapp_bad_signature", message: "Rejected an inbound WhatsApp webhook with an invalid or missing signature." });
+      return;
+    }
+
+    const incoming = whatsappChannel.parseIncomingWebhook(req.body);
+    if (!incoming) return; // status update (delivered/read) or a non-text message type — nothing to answer
+
+    const match = getTenantByWhatsAppPhoneNumberId(incoming.phoneNumberId);
+    if (!match) {
+      logError({ context: "whatsapp_unknown_number", message: `Inbound WhatsApp message for phone_number_id "${incoming.phoneNumberId}", which no tenant has channelEnabled for.` });
+      return;
+    }
+    const { tenantId, tenant, whatsappConfig } = match;
+
+    // Conversation history persisted server-side, keyed by the sender's
+    // WhatsApp number — there's no browser/client to hold this the way the
+    // widget's frontend JS does. TTL matches WhatsApp's own 24-hour
+    // customer-service window: once that closes, a fresh conversation on
+    // Meta's side may as well be a fresh one here too.
+    const historyKey = `wa:history:${tenantId}:${incoming.from}`;
+    const priorHistory = (await kvGet(historyKey)) || [];
+    const cleanMessages = sanitizeMessages([...priorHistory, { role: "user", content: incoming.text }]);
+    const trimmedHistory = cleanMessages.slice(-12);
+
+    const kbMessages = [];
+    if (kbClient.isConfigured()) {
+      const priorUserTurn = [...trimmedHistory].reverse().find((m) => m.role === "user" && m.content !== incoming.text);
+      const kbSearchQuery = priorUserTurn ? `${priorUserTurn.content} ${incoming.text}` : incoming.text;
+      const kbResult = await kbClient.search(tenantId, kbSearchQuery, tenant.useKbOnly ? 8 : 5, { fast: true, vectorDb: tenant.dataResidency });
+      if (kbResult.ok && Array.isArray(kbResult.data?.results) && kbResult.data.results.length > 0) {
+        const context = kbResult.data.results
+          .map((r, i) => `[${i + 1}] (source: ${r.sourceFile || "unknown"}${r.country ? ` — ${r.country}` : ""})\n${r.text}`)
+          .join("\n\n");
+        kbMessages.push({
+          role: "system",
+          content: `Here is knowledge base context retrieved for the user's latest message. Use it if relevant; if it doesn't contain the answer, say so rather than guessing.\n\n${context}`,
+        });
+      } else if (!kbResult.ok) {
+        logError({ context: "kb_search_failed", tenantId, message: kbResult.error });
+      }
+    }
+
+    // streamFromProviderChain only ever calls res.write() on the object
+    // it's given (see providerChain.js) — never .status/.end/.setHeader —
+    // so a plain buffering object stands in perfectly for a real Express
+    // response here. This reuses the exact same provider-failover,
+    // mid-stream-splice protection, and diagnostics logic as the web
+    // widget path rather than maintaining a second, less-tested copy of it
+    // for this channel. It THROWS (doesn't return ok:false) when every
+    // provider fails — same contract the /api/chat handler relies on.
+    let buffered = "";
+    const bufferingRes = { write: (chunk) => { buffered += chunk; } };
+    let result;
+    try {
+      result = await streamFromProviderChain(
+        tenant.providerChain,
+        () => [{ role: "system", content: tenant.systemPrompt }, ...kbMessages, ...trimmedHistory],
+        bufferingRes,
+        null
+      );
+    } catch (err) {
+      logError({
+        context: "whatsapp_all_providers_failed",
+        tenantId,
+        message: err.message,
+        attemptsCount: Array.isArray(err.attempts) ? err.attempts.length : 0,
+        attempts: err.attempts || [],
+      });
+      await whatsappChannel.sendMessage(whatsappConfig, incoming.from, "Sorry, I'm having trouble answering right now — please try again in a moment.");
+      return;
+    }
+
+    const { cleanText, followups } = whatsappChannel.extractFollowups(buffered || result.fullResponseText);
+    const withFollowups = whatsappChannel.appendFollowupsAsText(cleanText, followups);
+    const formatted = whatsappChannel.toWhatsAppFormatting(withFollowups);
+    await whatsappChannel.sendMessage(whatsappConfig, incoming.from, formatted);
+
+    const updatedHistory = [...trimmedHistory, { role: "assistant", content: cleanText }];
+    await kvSet(historyKey, updatedHistory, 60 * 60 * 24);
+  } catch (err) {
+    logError({ context: "whatsapp_webhook_error", message: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 6. Chat endpoint
 // ---------------------------------------------------------------------------
 app.post("/api/chat", async (req, res) => {
@@ -1152,24 +1299,23 @@ app.post("/api/chat", async (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("X-Accel-Buffering", "no");
 
-  // ---------------------------------------------------------------------
-  // Guardrail pass — runs before any provider call. Writes a complete
-  // response (text + trailing followups JSON block, same wire format the
-  // LLM path produces) and returns early. This keeps the on-the-wire
-  // contract identical for the widget regardless of which path answered.
-  // ---------------------------------------------------------------------
-  function sendGuardrailResponse(text, followups, logExtra) {
+  // Writes a message plus a renderForm marker instead of followups — same
+  // "text + trailing JSON block" wire contract sendGuardrailResponse uses,
+  // just a different block, so the widget only needs one more case in its
+  // existing parser, not a whole new response shape.
+  function sendFormResponse(automation) {
+    const text = `Sure — fill in the details below and hit send.`;
     res.write(text);
-    res.write(`\n\n\`\`\`json\n${JSON.stringify({ followups: followups || [] })}\n\`\`\``);
-    logConversation({
-      sessionId: sid,
-      tenantId,
-      userMessage: lastUserMessage,
-      assistantResponse: text,
-      guardrail: true,
-      durationMs: 0,
-      ...logExtra,
-    });
+    res.write(
+      `\n\n\`\`\`json\n${JSON.stringify({
+        renderForm: {
+          automationId: automation.id,
+          name: automation.name || automation.id,
+          fields: automation.fields.map((f) => ({ key: f.key, label: f.label || f.key, required: f.required !== false })),
+        },
+      })}\n\`\`\``
+    );
+    logConversation({ sessionId: sid, tenantId, userMessage: lastUserMessage, assistantResponse: text, guardrail: true, durationMs: 0, intent: `${automation.id}_form_shown` });
     res.end();
   }
 
@@ -1178,103 +1324,21 @@ app.post("/api/chat", async (req, res) => {
   const startFollowups = tenant.suggestedQuestions.slice(0, 3);
   const automations = tenant.automations;
 
-  // --- Automation Router -----------------------------------------------
-  // Every message passes through here first. A session mid-flow on some
-  // automation is continued regardless of what the new message looks like
-  // (a reply like "Ali Raza" or "yes" isn't classifiable on its own —
-  // context, i.e. which automation is active, is everything). Otherwise,
-  // the message is matched against every ENABLED automation's triggers,
-  // in tenant-configured order. No match -> falls through to the normal
-  // Knowledge Chat / LLM flow below.
-  const activeAutomationId = await automationState.getActivePointer(sid);
-  if (activeAutomationId) {
-    const automation = getAutomationById(automations, activeAutomationId);
-    if (automation && automation.enabled) {
-      if (await automationState.isConfirming(automation.id, sid)) {
-        const state = await automationState.getState(automation.id, sid);
-
-        if (isAffirmative(lastUserMessage)) {
-          await automationState.clear(automation.id, sid);
-          await automationState.clearActivePointer(sid);
-          const result = await executeAutomation(automation, { tenant, tenantId, sessionId: sid, collected: state.collected, logLead, logExecution });
-          return sendGuardrailResponse(result.message || "Done.", [], { intent: `${automation.id}_captured` });
-        }
-
-        // Not affirmative — treat as a correction. Genuinely needs an LLM
-        // call (parsing "actually my email is X" needs understanding, not
-        // regex) — the one place in this flow that isn't instant.
-        const fresh = await structureFieldAnswers(tenant, automation.fields, lastUserMessage, cleanMessages);
-        const merged = mergeStructured(state.collected, fresh);
-        const { notes, _structured, ...correctedFields } = merged;
-        await automationState.startConfirming(automation.id, sid, tenantId, correctedFields);
-        return sendGuardrailResponse(confirmationSummary(automation.fields, correctedFields), [], { intent: `${automation.id}_correction` });
-      }
-
-      if (await automationState.isCollecting(automation.id, sid)) {
-        const state = await automationState.getState(automation.id, sid);
-        const field = automation.fields.find((f) => f.key === state.currentKey);
-
-        // Heuristic-first, LLM-fallback: is this reply actually answering
-        // `field`, or a cancel request, or an unrelated question/comment?
-        // Without this, ANY reply here got silently recorded as the raw
-        // field value — "cancel", "wait what's your refund policy?", etc.
-        // See lib/digressionHandler.js for the tiered cost reasoning.
-        if (detectCancelIntent(lastUserMessage)) {
-          await automationState.clear(automation.id, sid);
-          await automationState.clearActivePointer(sid);
-          return sendGuardrailResponse(
-            "No problem — I've cancelled that. Let me know if you'd like to start again anytime.",
-            [],
-            { intent: `${automation.id}_cancelled` }
-          );
-        }
-
-        if (!looksLikePlausibleAnswer(lastUserMessage, field)) {
-          const classification = await classifyFieldReply(tenant, field, lastUserMessage);
-
-          if (classification === "CANCEL") {
-            await automationState.clear(automation.id, sid);
-            await automationState.clearActivePointer(sid);
-            return sendGuardrailResponse(
-              "No problem — I've cancelled that. Let me know if you'd like to start again anytime.",
-              [],
-              { intent: `${automation.id}_cancelled` }
-            );
-          }
-
-          if (classification === "DIGRESSION") {
-            // Deliberately does NOT record a value and does NOT clear
-            // automationState — the flow stays paused exactly where it
-            // was, so their NEXT reply still targets this same field.
-            const digression = await answerDigression(tenant, lastUserMessage, cleanMessages);
-            const reminder = `\n\n(Back to your ${automation.name || automation.id} — ${fieldQuestionText(field, false)})`;
-            return sendGuardrailResponse(
-              (digression?.text || "I don't have a good answer for that right now.") + reminder,
-              digression?.followups || [],
-              { intent: `${automation.id}_digression` }
-            );
-          }
-          // classification === "ANSWER" — heuristic was wrong, fall through
-          // to recording it exactly like the confident-heuristic path below.
-        }
-
-        const value = cleanFieldAnswer(lastUserMessage, field);
-        const result = await automationState.recordAnswerAndAdvance(automation.id, sid, value);
-
-        if (result.done) {
-          return sendGuardrailResponse(confirmationSummary(automation.fields, result.collected), [], { intent: `${automation.id}_confirming` });
-        }
-        const nextField = automation.fields.find((f) => f.key === result.nextKey);
-        const slots = looksLikeTimeField(nextField) ? generateAvailableSlots(tenant) : [];
-        const suffix = slots.length ? " Here are some times that could work, or suggest your own:" : "";
-        return sendGuardrailResponse(fieldQuestionText(nextField, false) + suffix, slots.map((s) => s.label), { intent: `${automation.id}_collecting` });
-      }
-    }
-    // Stale or disabled-mid-flow pointer — drop it and fall through to
-    // normal handling of whatever they actually sent.
-    await automationState.clearActivePointer(sid);
-  }
-
+  // --- Automation Router -------------------------------------------------
+  // Every message is matched against every ENABLED automation's triggers,
+  // in tenant-configured order. A match with fields to fill renders a form
+  // in the widget (see sendFormResponse above) instead of asking for each
+  // field one message at a time — no session state to track ("mid-flow on
+  // automation X"), no per-message classifier deciding whether a reply is
+  // an answer, a digression, or a cancel, no field label spliced into a
+  // question template. The user sees every field at once, blank — no
+  // auto-fill from conversation context either, deliberately: a value the
+  // user typed themselves is unambiguous; one silently pulled from context
+  // requires them to notice, read, and correct it if wrong instead. The
+  // actual submission is validated server-side in POST
+  // /api/automation-submit before executeAutomation ever runs, same as
+  // before. No match -> falls through to the normal Knowledge Chat / LLM
+  // flow below.
   const intent = classifyIntent(lastUserMessage);
 
   if (intent === "injection") {
@@ -1289,35 +1353,13 @@ app.post("/api/chat", async (req, res) => {
 
   const matchedAutomation = matchAutomation(automations, lastUserMessage);
   if (matchedAutomation) {
-    // Check conversation history first — anything already mentioned
-    // earlier gets pre-filled so we don't ask for it again.
-    const knownFields = await extractKnownFields(tenant, matchedAutomation.fields, cleanMessages);
-    const missingFields = matchedAutomation.fields.filter((f) => !knownFields[f.key]);
-
-    if (missingFields.length === 0) {
-      if (matchedAutomation.fields.length === 0) {
-        // No input needed at all — just run it (e.g. a zero-field human
-        // handover automation).
-        const result = await executeAutomation(matchedAutomation, { tenant, tenantId, sessionId: sid, collected: {}, logLead, logExecution });
-        return sendGuardrailResponse(result.message || "Done.", [], { intent: `${matchedAutomation.id}_executed` });
-      }
-      await automationState.startConfirming(matchedAutomation.id, sid, tenantId, knownFields);
-      await automationState.setActivePointer(sid, matchedAutomation.id);
-      return sendGuardrailResponse(confirmationSummary(matchedAutomation.fields, knownFields), [], { intent: `${matchedAutomation.id}_confirming` });
+    if (matchedAutomation.fields.length === 0) {
+      // No input needed at all — just run it (e.g. a zero-field human
+      // handover automation).
+      const result = await executeAutomation(matchedAutomation, { tenant, tenantId, sessionId: sid, collected: {}, logLead, logExecution });
+      return sendGuardrailResponse(result.message || "Done.", [], { intent: `${matchedAutomation.id}_executed` });
     }
-
-    const firstField = missingFields[0];
-    const startIndex = matchedAutomation.fields.findIndex((f) => f.key === firstField.key);
-    const remainingKeys = matchedAutomation.fields
-      .slice(startIndex)
-      .map((f) => f.key)
-      .filter((k) => missingFields.some((f) => f.key === k));
-    await automationState.startCollecting(matchedAutomation.id, sid, tenantId, knownFields, remainingKeys);
-    await automationState.setActivePointer(sid, matchedAutomation.id);
-
-    const slots = looksLikeTimeField(firstField) ? generateAvailableSlots(tenant) : [];
-    const suffix = slots.length ? " Here are some times that could work, or suggest your own:" : "";
-    return sendGuardrailResponse(fieldQuestionText(firstField, true) + suffix, slots.map((s) => s.label), { intent: `${matchedAutomation.id}_requested` });
+    return sendFormResponse(matchedAutomation);
   }
 
   if (intent === "greeting") {
@@ -1495,6 +1537,54 @@ app.post("/api/chat", async (req, res) => {
     responseFinished = true;
     res.end();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Form-based automation submission — the counterpart to the renderForm
+// marker sent from /api/chat above. The widget renders the form entirely
+// client-side and posts the completed fields here as one plain JSON
+// request, not as another chat message; there is no server-side session
+// state for "mid-automation" the way the old field-collection system had
+// — nothing to get out of sync, nothing to time out, nothing a stray chat
+// message elsewhere could disrupt. Validated with the exact same
+// validateArguments() used by aiBooking's tool-call path, since "is this
+// submission complete and well-formed" is the same question regardless of
+// how the data arrived.
+// ---------------------------------------------------------------------------
+app.post("/api/automation-submit", async (req, res) => {
+  const { sessionId, tenantId: rawTenantId, automationId, fields } = req.body;
+  const sid = typeof sessionId === "string" && sessionId ? sessionId : "unknown";
+  const tenantId = typeof rawTenantId === "string" && rawTenantId ? rawTenantId : DEFAULT_TENANT;
+
+  const tenant = getTenant(tenantId);
+  if (!tenant) {
+    logError({ context: "validation", sessionId: sid, tenantId, message: `Unknown tenantId "${tenantId}"` });
+    return res.status(400).json({ ok: false, error: FRIENDLY_ERROR_MESSAGES.validation });
+  }
+  if (!isOriginAllowed(tenant, req.headers.origin)) {
+    logSecurity({ context: "origin_blocked", sessionId: sid, tenantId, message: `Blocked origin: ${req.headers.origin}` });
+    return res.status(403).json({ ok: false, error: FRIENDLY_ERROR_MESSAGES.validation });
+  }
+  if (!isWidgetKeyValid(tenant, req.headers["x-widget-key"])) {
+    logSecurity({ context: "widget_key_invalid", sessionId: sid, tenantId, message: "Missing or incorrect X-Widget-Key" });
+    return res.status(403).json({ ok: false, error: FRIENDLY_ERROR_MESSAGES.validation });
+  }
+  if (await isRateLimited(req.ip, tenantId)) {
+    return res.status(429).json({ ok: false, error: "Too many requests — please slow down and try again in a moment." });
+  }
+
+  const automation = getAutomationById(tenant.automations, automationId);
+  if (!automation || !automation.enabled) {
+    return res.status(400).json({ ok: false, error: "That form is no longer available — please ask again in the chat." });
+  }
+
+  const { valid, problems } = validateArguments(automation.fields, fields || {});
+  if (!valid) {
+    return res.status(400).json({ ok: false, error: problems.join(" ") });
+  }
+
+  const result = await executeAutomation(automation, { tenant, tenantId, sessionId: sid, collected: fields, logLead, logExecution });
+  return res.json({ ok: true, message: result.message || "Done." });
 });
 
 function startServer() {
