@@ -284,7 +284,7 @@
             '<textarea class="ib-textarea" id="ib-input" rows="1" maxlength="' + MAX_INPUT_LENGTH + '" placeholder="Ask a question..."></textarea>' +
             '<button class="ib-send-btn" id="ib-send-btn" type="button" aria-label="Send">' + ICON_SEND + "</button>" +
           "</div>" +
-          '<div class="ib-footnote">Answers are grounded strictly in the survey dataset.</div>' +
+          '<div class="ib-footnote">Answers are strictly grounded to visa information.</div>' +
         "</div>" +
       "</div>";
     document.body.appendChild(root);
@@ -617,7 +617,7 @@
     // -------------------------------------------------------------------
     // Status indicator
     // -------------------------------------------------------------------
-    var STATUS_MESSAGES = ["Thinking 🤔...", "Analyzing 🧠...", "Reading survey data 💭..."];
+    var STATUS_MESSAGES = ["Thinking 🤔...", "Analyzing 🧠...", "Asking to senior consultant 💭..."];
     function typingIndicator() {
       var bubble = createRow("bot");
       bubble.innerHTML =
